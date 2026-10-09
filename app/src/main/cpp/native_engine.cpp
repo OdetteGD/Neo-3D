@@ -97,6 +97,35 @@ static Mat4 rotateX(float a) {
     return m;
 }
 
+static Mat4 inverseMat4(const Mat4& m) {
+    Mat4 inv{};
+    const float* a = m.v;
+    float b00 = a[0]*a[5] - a[1]*a[4], b01 = a[0]*a[6] - a[2]*a[4], b02 = a[0]*a[7] - a[3]*a[4];
+    float b03 = a[1]*a[6] - a[2]*a[5], b04 = a[1]*a[7] - a[3]*a[5], b05 = a[2]*a[7] - a[3]*a[6];
+    float b06 = a[8]*a[13]- a[9]*a[12],b07 = a[8]*a[14]- a[10]*a[12],b08 = a[8]*a[15]- a[11]*a[12];
+    float b09 = a[9]*a[14]- a[10]*a[13],b10 = a[9]*a[15]- a[11]*a[13],b11 = a[10]*a[15]- a[11]*a[14];
+    float det = b00*b11 - b01*b10 + b02*b09 + b03*b08 - b04*b07 + b05*b06;
+    if (std::abs(det) < 1e-8f) return identity();
+    float invDet = 1.0f / det;
+    inv.v[0] = (a[5]*b11 - a[6]*b10 + a[7]*b09) * invDet;
+    inv.v[1] = (-a[1]*b11 + a[2]*b10 - a[3]*b09) * invDet;
+    inv.v[2] = (a[13]*b05 - a[14]*b04 + a[15]*b03) * invDet;
+    inv.v[3] = (-a[9]*b05 + a[10]*b04 - a[11]*b03) * invDet;
+    inv.v[4] = (-a[4]*b11 + a[6]*b08 - a[7]*b07) * invDet;
+    inv.v[5] = (a[0]*b11 - a[2]*b08 + a[3]*b07) * invDet;
+    inv.v[6] = (-a[12]*b05 + a[14]*b02 - a[15]*b01) * invDet;
+    inv.v[7] = (a[8]*b05 - a[10]*b02 + a[11]*b01) * invDet;
+    inv.v[8] = (a[4]*b10 - a[5]*b08 + a[7]*b06) * invDet;
+    inv.v[9] = (-a[0]*b10 + a[1]*b08 - a[3]*b06) * invDet;
+    inv.v[10] = (a[12]*b04 - a[13]*b02 + a[15]*b00) * invDet;
+    inv.v[11] = (-a[8]*b04 + a[9]*b02 - a[11]*b00) * invDet;
+    inv.v[12] = (-a[4]*b09 + a[5]*b07 - a[6]*b06) * invDet;
+    inv.v[13] = (a[0]*b09 - a[1]*b07 + a[2]*b06) * invDet;
+    inv.v[14] = (-a[12]*b03 + a[13]*b01 - a[14]*b00) * invDet;
+    inv.v[15] = (a[8]*b03 - a[9]*b01 + a[10]*b00) * invDet;
+    return inv;
+}
+
 class VulkanRenderer {
 public:
     explicit VulkanRenderer(ANativeWindow* w) : window_(w) {
@@ -121,9 +150,7 @@ public:
         }
     }
 
-    void resize(int, int) {
-        resizeRequested_.store(true);
-    }
+    void resize(int, int) { resizeRequested_.store(true); }
 
     void stop() {
         running_.store(false);
@@ -140,7 +167,9 @@ public:
 
     void setAutoRotate(bool value) { autoRotate_.store(value); }
 
-    void zoom(float delta) { cameraDistance_.store(std::clamp(cameraDistance_.load() + delta, 1.5f, 30.0f)); }
+    void zoom(float delta) {
+        cameraDistance_.store(std::clamp(cameraDistance_.load() + delta, 1.5f, 30.0f));
+    }
 
     void moveCamera(float forward, float right) {
         cameraForward_.store(std::clamp(cameraForward_.load() + forward * 0.12f, -20.0f, 20.0f));
@@ -150,7 +179,9 @@ public:
     void resetView() {
         yaw_.store(0.0f);
         pitch_.store(-0.28f);
-        cameraDistance_.store(5.0f); cameraForward_.store(0.0f); cameraRight_.store(0.0f);
+        cameraDistance_.store(5.0f);
+        cameraForward_.store(0.0f);
+        cameraRight_.store(0.0f);
         autoRotate_.store(true);
     }
 
@@ -183,9 +214,7 @@ public:
             const float cy = (lo[1] + hi[1]) * 0.5f;
             const float cz = (lo[2] + hi[2]) * 0.5f;
             const float span = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
-            if (!std::isfinite(span) || span < 1e-8f) {
-                throw std::runtime_error("GLB mesh has degenerate bounds");
-            }
+            if (!std::isfinite(span) || span < 1e-8f) throw std::runtime_error("GLB mesh has degenerate bounds");
 
             const float scale = 2.4f / span;
             std::vector<DrawRange> ranges;
@@ -197,6 +226,7 @@ public:
                 std::copy(p.baseColorFactor, p.baseColorFactor + 4, range.baseColor);
                 range.metallic = p.metallicFactor;
                 range.roughness = p.roughnessFactor;
+
                 for (const auto& v : p.vertices) {
                     Vertex out{};
                     for (int k = 0; k < 3; ++k) {
@@ -263,7 +293,12 @@ private:
     VkBuffer vertexBuffer_ = VK_NULL_HANDLE, indexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory vertexMemory_ = VK_NULL_HANDLE, indexMemory_ = VK_NULL_HANDLE;
     uint32_t indexCount_ = 0;
-    struct DrawRange { uint32_t firstIndex=0, indexCount=0; float baseColor[4]{1,1,1,1}; float metallic=1, roughness=1; };
+
+    struct DrawRange {
+        uint32_t firstIndex = 0, indexCount = 0;
+        float baseColor[4]{1, 1, 1, 1};
+        float metallic = 1.0f, roughness = 1.0f;
+    };
     std::vector<DrawRange> importedRanges_;
 
     static constexpr size_t kFrames = 2;
@@ -282,12 +317,27 @@ private:
     std::string deviceName_ = "unknown GPU", status_ = "Vulkan renderer not initialized";
     std::mutex lifecycleMutex_;
 
+    // Exact Push Constant Structures (256-byte aligned)
+    struct MeshPushConstants {
+        Mat4 mvp;           // 64 bytes
+        Mat4 model;         // 64 bytes
+        float baseColor[4]; // 16 bytes
+        float material[4];  // 16 bytes: x=metallic, y=roughness, z=ao, w=extra
+        float cameraPos[4]; // 16 bytes: xyz=pos, w=time
+        float sunDir[4];    // 16 bytes: xyz=dir, w=intensity
+    };
+
+    struct SkyPushConstants {
+        Mat4 invViewProj;   // 64 bytes
+        float sunDir[4];    // 16 bytes
+    };
+
     void initialize() {
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         app.pApplicationName = "Neo-3D";
-        app.applicationVersion = VK_MAKE_VERSION(0, 2, 0);
+        app.applicationVersion = VK_MAKE_VERSION(0, 3, 0);
         app.pEngineName = "Neo-3D Mobile Vulkan Engine";
-        app.engineVersion = VK_MAKE_VERSION(0, 2, 0);
+        app.engineVersion = VK_MAKE_VERSION(0, 3, 0);
         app.apiVersion = VK_API_VERSION_1_0;
 
         const char* exts[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
@@ -314,7 +364,7 @@ private:
         createSkyPipeline();
         createSync();
 
-        status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | Vulkan geometry + depth + GGX PBR + blue-sky clear";
+        status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | Cook-Torrance GGX PBR + ACES Tone Mapping";
         LOGI("%s", status_.c_str());
     }
 
@@ -448,7 +498,6 @@ private:
         std::vector<VkSurfaceFormatKHR> fs(n);
         vkGetPhysicalDeviceSurfaceFormatsKHR(physical_, surface_, &n, fs.data());
 
-        // Preferred formats for mobile Mali: R8G8B8A8_UNORM first, then fallback
         VkSurfaceFormatKHR chosen = fs.front();
         for (const auto& f : fs) {
             if ((f.format == VK_FORMAT_R8G8B8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_UNORM) &&
@@ -469,7 +518,6 @@ private:
         uint32_t ic = caps.minImageCount + 1;
         if (caps.maxImageCount && ic > caps.maxImageCount) ic = caps.maxImageCount;
 
-        // Supported composite alpha selection
         VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
         if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
             compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -533,17 +581,15 @@ private:
 
     void createRenderPass() {
         std::array<VkAttachmentDescription, 2> a{};
-        // Color Attachment
         a[0].format = format_;
         a[0].samples = VK_SAMPLE_COUNT_1_BIT;
         a[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // MUST be STORE for Mali TBDR!
+        a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Essential for Mali TBDR!
         a[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         a[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         a[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-        // Depth Attachment
         a[1].format = depthFormat_;
         a[1].samples = VK_SAMPLE_COUNT_1_BIT;
         a[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -562,10 +608,7 @@ private:
         sub.pColorAttachments = &color;
         sub.pDepthStencilAttachment = &depth;
 
-        // Dual Subpass Dependencies (Entry & Exit for Mali tile-buffer flush)
         std::array<VkSubpassDependency, 2> deps{};
-
-        // 1. Entry: Wait for swapchain image acquire before writing color/depth
         deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
         deps[0].dstSubpass = 0;
         deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
@@ -573,7 +616,6 @@ private:
         deps[0].srcAccessMask = 0;
         deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-        // 2. Exit: Ensure tile cache flushes to RAM before presenting to screen
         deps[1].srcSubpass = 0;
         deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
         deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -645,7 +687,7 @@ private:
             VkPushConstantRange range{};
             range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
             range.offset = 0;
-            range.size = sizeof(Mat4) * 2 + sizeof(float) * 8;
+            range.size = sizeof(MeshPushConstants);
 
             VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             li.pushConstantRangeCount = 1;
@@ -765,7 +807,14 @@ private:
         VkShaderModule vert = shader(kSkyVert, kSkyVertSize);
         VkShaderModule frag = shader(kSkyFrag, kSkyFragSize);
         try {
+            VkPushConstantRange range{};
+            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            range.offset = 0;
+            range.size = sizeof(SkyPushConstants);
+
             VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            li.pushConstantRangeCount = 1;
+            li.pPushConstantRanges = &range;
             check(vkCreatePipelineLayout(device_, &li, nullptr, &skyPipelineLayout_), "vkCreatePipelineLayout(sky)");
 
             std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
@@ -847,9 +896,8 @@ private:
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         check(vkBeginCommandBuffer(commandBuffers_[i], &bi), "vkBeginCommandBuffer");
 
-        // Clear values: Blue sky clear & depth clear
         VkClearValue clears[2]{};
-        clears[0].color = {{0.16f, 0.48f, 0.78f, 1.0f}};
+        clears[0].color = {{0.12f, 0.22f, 0.38f, 1.0f}};
         clears[1].depthStencil = {1.0f, 0};
 
         VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -861,45 +909,83 @@ private:
 
         vkCmdBeginRenderPass(commandBuffers_[i], &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-        // Optional Sky Shader: Kung may issue pa rin sa fragment shader ng sky,
-        // maaari mong i-comment out ang 2 linyang ito para masigurong solid clear blue ang makikita.
+        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
+        float yaw = autoRotate_.load() ? t * 0.45f : yaw_.load();
+        float pitch = pitch_.load();
+        float dist = cameraDistance_.load();
+
+        // 1. Precise 3D Camera Orbit Position (World Space)
+        float camX = dist * std::sin(yaw) * std::cos(pitch) + cameraRight_.load();
+        float camY = -dist * std::sin(pitch) + cameraForward_.load();
+        float camZ = dist * std::cos(yaw) * std::cos(pitch);
+
+        Mat4 view = multiply(rotateX(-pitch), multiply(rotateY(-yaw), translate(-cameraRight_.load(), -cameraForward_.load(), -dist)));
+        Mat4 projection = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
+        Mat4 viewProj = multiply(projection, view);
+
+        // Sun Direction & Intensity
+        float sunDir[4] = {-0.55f, 0.85f, 0.45f, 3.4f};
+
+        // 2. Draw 3D Atmospheric Sky Dome (Rotates accurately with camera!)
         if (skyPipeline_ != VK_NULL_HANDLE) {
+            SkyPushConstants skyPush{};
+            skyPush.invViewProj = inverseMat4(viewProj);
+            std::copy(sunDir, sunDir + 4, skyPush.sunDir);
+
             vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
+            vkCmdPushConstants(commandBuffers_[i], skyPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyPushConstants), &skyPush);
             vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
         }
 
-        // Draw 3D Geometry
+        // 3. Draw 3D Geometry with Cook-Torrance GGX PBR Shading
         vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &vertexBuffer_, &offset);
         vkCmdBindIndexBuffer(commandBuffers_[i], indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
-        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
-        float yaw = autoRotate_.load() ? t * 0.65f : yaw_.load();
-        Mat4 view = translate(-cameraRight_.load(), -cameraForward_.load(), -cameraDistance_.load());
-        Mat4 projection = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
-
-        struct Push { Mat4 mvp; Mat4 model; float baseColor[4]; float material[4]; };
+        MeshPushConstants push{};
+        push.cameraPos[0] = camX;
+        push.cameraPos[1] = camY;
+        push.cameraPos[2] = camZ;
+        push.cameraPos[3] = t;
+        std::copy(sunDir, sunDir + 4, push.sunDir);
 
         if (importedModel_) {
-            Mat4 model = multiply(rotateY(yaw), rotateX(pitch_.load()));
-            Mat4 mvp = multiply(projection, multiply(view, model));
+            Mat4 model = identity();
+            push.model = model;
+            push.mvp = multiply(viewProj, model);
+
             for (const auto& range : importedRanges_) {
-                Push push{mvp, model, {}, {}};
                 std::copy(range.baseColor, range.baseColor + 4, push.baseColor);
                 push.material[0] = range.metallic;
                 push.material[1] = range.roughness;
-                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+                push.material[2] = 1.0f; // AO
+                push.material[3] = 0.0f;
+
+                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
                 vkCmdDrawIndexed(commandBuffers_[i], range.indexCount, 1, range.firstIndex, 0, 0);
             }
         } else {
             const float positions[3] = {-1.55f, 0.0f, 1.55f};
             for (int object = 0; object < 3; ++object) {
-                Mat4 local = multiply(rotateY(yaw + (object - 1) * 0.45f), rotateX(pitch_.load() + (object - 1) * 0.12f));
+                Mat4 local = multiply(rotateY(yaw + (object - 1) * 0.45f), rotateX(pitch + (object - 1) * 0.12f));
                 Mat4 model = multiply(translate(positions[object], object == 1 ? 0.0f : -0.12f, 0.0f), local);
-                Mat4 mvp = multiply(projection, multiply(view, model));
-                Push push{mvp, model, {0.16f, 0.58f, 0.92f, 1.0f}, {0.18f, 0.32f, 0.0f, 0.0f}};
-                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+                push.model = model;
+                push.mvp = multiply(viewProj, model);
+
+                // Material properties: Gold, Chrome, and Rough Matte
+                if (object == 0) {
+                    push.baseColor[0] = 1.00f; push.baseColor[1] = 0.76f; push.baseColor[2] = 0.33f; push.baseColor[3] = 1.0f; // Gold
+                    push.material[0] = 0.95f; push.material[1] = 0.15f; push.material[2] = 1.0f; push.material[3] = 0.0f;
+                } else if (object == 1) {
+                    push.baseColor[0] = 0.95f; push.baseColor[1] = 0.95f; push.baseColor[2] = 0.98f; push.baseColor[3] = 1.0f; // Silver
+                    push.material[0] = 0.98f; push.material[1] = 0.08f; push.material[2] = 1.0f; push.material[3] = 0.0f;
+                } else {
+                    push.baseColor[0] = 0.18f; push.baseColor[1] = 0.52f; push.baseColor[2] = 0.88f; push.baseColor[3] = 1.0f; // Matte Blue
+                    push.material[0] = 0.05f; push.material[1] = 0.45f; push.material[2] = 1.0f; push.material[3] = 0.0f;
+                }
+
+                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
                 vkCmdDrawIndexed(commandBuffers_[i], indexCount_, 1, 0, 0, 0);
             }
         }
@@ -1003,7 +1089,7 @@ private:
             createCommands();
             createGraphicsPipeline();
             createSkyPipeline();
-            status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | indexed cube + depth + GGX PBR";
+            status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | Cook-Torrance GGX PBR + ACES Tone Mapping";
         } catch (const std::exception& e) {
             status_ = std::string("Swapchain rebuild failed: ") + e.what();
             LOGE("%s", status_.c_str());
