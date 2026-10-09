@@ -25,6 +25,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeOrbit(dx: Float, dy: Float)
     private external fun nativeSetAutoRotate(enabled: Boolean)
     private external fun nativeResetView()
+    private external fun nativeZoom(delta: Float)
+    private external fun nativeMoveCamera(forward: Float, right: Float)
 
     private lateinit var status: TextView
     private lateinit var diagnostics: TextView
@@ -54,6 +56,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var surfaceReady = false
     private var lastX = 0f
     private var lastY = 0f
+    private var lastPinchDistance = 0f
+    private var joystickForward = 0f
+    private var joystickRight = 0f
+    private val joystickHandler = Handler(Looper.getMainLooper())
+    private val joystickTick = object : Runnable {
+        override fun run() {
+            if (surfaceReady && (joystickForward != 0f || joystickRight != 0f)) {
+                nativeMoveCamera(joystickForward, joystickRight)
+                joystickHandler.postDelayed(this, 32)
+            }
+        }
+    }
     private var autoRotate = true
     private val importRequestCode = 3107
 
@@ -145,19 +159,36 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
                     lastY = event.y
+                    lastPinchDistance = 0f
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (event.pointerCount >= 2) lastPinchDistance = pointerDistance(event)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = event.x - lastX
-                    val dy = event.y - lastY
+                    if (event.pointerCount >= 2) {
+                        val distance = pointerDistance(event)
+                        if (lastPinchDistance > 0f && distance > 0f && surfaceReady) {
+                            nativeZoom((lastPinchDistance - distance) * 0.018f)
+                        }
+                        lastPinchDistance = distance
+                    } else {
+                        val dx = event.x - lastX
+                        val dy = event.y - lastY
+                        if (surfaceReady) {
+                            nativeSetAutoRotate(false)
+                            autoRotate = false
+                            rotate.text = "Auto: OFF"
+                            nativeOrbit(dx, dy)
+                        }
+                    }
                     lastX = event.x
                     lastY = event.y
-                    if (surfaceReady) {
-                        nativeSetAutoRotate(false)
-                        autoRotate = false
-                        rotate.text = "Auto: OFF"
-                        nativeOrbit(dx, dy)
-                    }
+                    true
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    lastPinchDistance = 0f
                     true
                 }
                 else -> true
@@ -165,7 +196,51 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
 
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
-        root.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
+        val viewportFrame = android.widget.FrameLayout(this)
+        viewportFrame.addView(viewport, android.widget.FrameLayout.LayoutParams(-1, -1))
+        val joystick = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(4, 4, 4, 4)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0x66303848)
+                cornerRadius = 18f
+            }
+        }
+        fun joystickButton(label: String, forward: Float, right: Float) = Button(this).apply {
+            text = label
+            textSize = 12f
+            minWidth = 44
+            setPadding(2, 0, 2, 0)
+            setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        joystickForward = forward
+                        joystickRight = right
+                        joystickHandler.removeCallbacks(joystickTick)
+                        joystickHandler.post(joystickTick)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        joystickForward = 0f
+                        joystickRight = 0f
+                        joystickHandler.removeCallbacks(joystickTick)
+                    }
+                }
+                true
+            }
+        }
+        joystick.addView(joystickButton("▲", 1f, 0f))
+        val joystickRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(joystickButton("◀", 0f, -1f))
+            addView(joystickButton("▼", -1f, 0f))
+            addView(joystickButton("▶", 0f, 1f))
+        }
+        joystick.addView(joystickRow)
+        val joystickParams = android.widget.FrameLayout.LayoutParams(-2, -2, android.view.Gravity.BOTTOM or android.view.Gravity.START)
+        joystickParams.setMargins(12, 12, 12, 12)
+        viewportFrame.addView(joystick, joystickParams)
+        root.addView(viewportFrame, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val logTitle = TextView(this).apply {
             text = "RENDER DIAGNOSTICS · latest 8 events"
@@ -194,6 +269,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         setContentView(root)
         addDiagnostic("UI started; awaiting Vulkan SurfaceView")
         uiHandler.post(diagnosticPoll)
+    }
+
+    private fun pointerDistance(event: MotionEvent): Float {
+        if (event.pointerCount < 2) return 0f
+        val dx = event.getX(0) - event.getX(1)
+        val dy = event.getY(0) - event.getY(1)
+        return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
     @Deprecated("Uses the platform document picker result callback for broad Android compatibility")
@@ -245,6 +327,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         uiHandler.removeCallbacks(diagnosticPoll)
+        joystickHandler.removeCallbacks(joystickTick)
+        joystickForward = 0f
+        joystickRight = 0f
         if (surfaceReady) nativeStop()
         surfaceReady = false
         super.onDestroy()
