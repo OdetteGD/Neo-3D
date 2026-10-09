@@ -132,10 +132,11 @@ inline GltfMeshDocument readGlbMeshes(const std::vector<std::uint8_t>& bytes) {
                 for(std::size_t i=0;i<nc;++i){float n[3];std::memcpy(n,container.binary.data()+no+i*ns,sizeof(n));const float len=std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]);if(len>1e-8f)for(int c=0;c<3;++c)result.vertices[i].normal[c]=n[c]/len;}
             }
             if(const auto* ix=p.get("indices")){
-                std::size_t io=0,is=0,ic=0,it=0;viewRange(ix->index(),1,1,io,is,ic,it);
                 const auto& ia=accessors.at(ix->index());const auto type=detail::required(ia,"componentType").index();
                 const std::size_t bytesPer=type==5121?1:type==5123?2:type==5125?4:0;
-                if(!bytesPer||is<bytesPer)throw std::runtime_error("glTF indices must be unsigned byte, short, or int");
+                if(!bytesPer)throw std::runtime_error("glTF indices must be unsigned byte, short, or int");
+                std::size_t io=0,is=0,ic=0,it=0;viewRange(ix->index(),bytesPer,1,io,is,ic,it);
+                if(is<bytesPer)throw std::runtime_error("glTF index stride is smaller than component size");
                 result.indices.reserve(ic);
                 for(std::size_t i=0;i<ic;++i){const auto at=io+i*is;std::uint32_t value=0;if(type==5121)value=container.binary.at(at);else if(type==5123)value=std::uint32_t(container.binary.at(at))|(std::uint32_t(container.binary.at(at+1))<<8);else value=detail::u32(container.binary,at);if(value>=posCount)throw std::runtime_error("glTF index exceeds POSITION accessor");result.indices.push_back(value);}
             } else {result.indices.resize(posCount);for(std::size_t i=0;i<posCount;++i)result.indices[i]=static_cast<std::uint32_t>(i);}
