@@ -3,6 +3,9 @@ package com.neo3d.engine
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.widget.ScrollView
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -23,6 +26,27 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeSetAutoRotate(enabled: Boolean)
     private external fun nativeResetView()
     private lateinit var status: TextView
+    private lateinit var diagnostics: TextView
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val diagnosticLines = ArrayDeque<String>()
+    private val diagnosticPoll = object : Runnable {
+        override fun run() {
+            if (surfaceReady) {
+                val current = nativeStatus()
+                status.text = current
+                if (diagnosticLines.lastOrNull() != current) addDiagnostic(current)
+            }
+            uiHandler.postDelayed(this, 1000)
+        }
+    }
+
+    private fun addDiagnostic(message: String) {
+        val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        diagnosticLines.addLast("[$stamp] $message")
+        while (diagnosticLines.size > 8) diagnosticLines.removeFirst()
+        if (::diagnostics.isInitialized) diagnostics.text = diagnosticLines.joinToString("\\n")
+        android.util.Log.i("Neo3D-Diagnostics", message)
+    }
     private var surfaceReady = false
     private var lastX = 0f
     private var lastY = 0f
@@ -73,7 +97,29 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
+        val logTitle = TextView(this).apply {
+            text = "RENDER DIAGNOSTICS · latest 8 events"
+            textSize = 10f
+            setTextColor(0xFF78D6FF.toInt())
+            setPadding(8, 4, 8, 2)
+        }
+        diagnostics = TextView(this).apply {
+            text = "Waiting for Vulkan surface initialization…"
+            textSize = 10f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(0xFFE3EAF4.toInt())
+            setPadding(8, 2, 8, 6)
+        }
+        val logScroll = ScrollView(this).apply {
+            setBackgroundColor(0xFF171E28.toInt())
+            isFillViewport = true
+            addView(diagnostics)
+        }
+        root.addView(logTitle, LinearLayout.LayoutParams(-1, -2))
+        root.addView(logScroll, LinearLayout.LayoutParams(-1, 104))
         setContentView(root)
+        addDiagnostic("UI started; awaiting Vulkan SurfaceView")
+        uiHandler.post(diagnosticPoll)
     }
 
     @Deprecated("Uses the platform document picker result callback for broad Android compatibility")
@@ -101,8 +147,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) { nativeStart(holder.surface); surfaceReady = true; status.text = nativeStatus() }
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { if (surfaceReady) nativeResize(width, height) }
-    override fun surfaceDestroyed(holder: SurfaceHolder) { surfaceReady = false; nativeStop() }
-    override fun onDestroy() { if (surfaceReady) nativeStop(); surfaceReady = false; super.onDestroy() }
+    override fun surfaceCreated(holder: SurfaceHolder) { addDiagnostic("Surface created; starting native Vulkan renderer"); nativeStart(holder.surface); surfaceReady = true; status.text = nativeStatus(); addDiagnostic(status.text.toString()) }
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { if (surfaceReady) { addDiagnostic("Surface changed: ${width}x${height}"); nativeResize(width, height) } }
+    override fun surfaceDestroyed(holder: SurfaceHolder) { addDiagnostic("Surface destroyed; stopping Vulkan renderer"); surfaceReady = false; nativeStop() }
+    override fun onDestroy() { uiHandler.removeCallbacks(diagnosticPoll); if (surfaceReady) nativeStop(); surfaceReady = false; super.onDestroy() }
 }
