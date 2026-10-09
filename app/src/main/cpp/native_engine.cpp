@@ -9,6 +9,8 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <stdexcept>
+#include <utility>
 #include <thread>
 #include <vector>
 
