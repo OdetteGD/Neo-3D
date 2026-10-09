@@ -57,7 +57,7 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
           sudo apt-get update
-          sudo apt-get install -y glslang-tools spirv-tools vulkan-tools
+          sudo apt-get install -y glslang-tools spirv-tools vulkan-tools vulkan-validationlayers
       - name: Verify project configuration
         shell: bash
         run: |
@@ -70,6 +70,7 @@ jobs:
           command -v glslangValidator
           command -v spirv-val
           command -v vulkaninfo
+          test -d /usr/share/vulkan/explicit_layer.d || test -d /usr/share/vulkan/implicit_layer.d
       - name: Build Android debug APK
         run: gradle --no-daemon --stacktrace assembleDebug
       - name: Run unit tests
