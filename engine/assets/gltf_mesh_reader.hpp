@@ -79,7 +79,7 @@ inline std::uint32_t u32(const std::vector<std::uint8_t>& b,std::size_t p){if(p>
 }
 
 struct GltfVertex { float position[3]{0,0,0}; float normal[3]{0,1,0}; };
-struct GltfPrimitive { std::vector<GltfVertex> vertices; std::vector<std::uint32_t> indices; std::size_t material=static_cast<std::size_t>(-1); };
+struct GltfPrimitive { std::vector<GltfVertex> vertices; std::vector<std::uint32_t> indices; std::size_t material=static_cast<std::size_t>(-1); float baseColorFactor[4]{1.0f,1.0f,1.0f,1.0f}; float metallicFactor=1.0f; float roughnessFactor=1.0f; };
 struct GltfMeshDocument { std::vector<GltfPrimitive> primitives; std::size_t skippedPrimitives=0; };
 
 inline GltfMeshDocument readGlbMeshes(const std::vector<std::uint8_t>& bytes) {
@@ -113,6 +113,33 @@ inline GltfMeshDocument readGlbMeshes(const std::vector<std::uint8_t>& bytes) {
         const std::size_t end=offset+(count?((count-1)*stride+componentBytes*components):0);
         if(end>viewStart+viewLength||end>expected)throw std::runtime_error("glTF accessor exceeds bufferView or buffer");
     };
+    // Read core glTF metallic-roughness material factors (textures are handled separately).
+    struct MaterialFactors { float base[4]{1,1,1,1}; float metallic=1, roughness=1; };
+    std::vector<MaterialFactors> materials;
+    if (const auto* list=root.get("materials")) {
+        materials.resize(list->size());
+        for (std::size_t mi=0; mi<list->size(); ++mi) {
+            const auto& material=list->at(mi);
+            const auto* pbr=material.get("pbrMetallicRoughness");
+            if (!pbr) continue;
+            auto readFactor=[&](const Json* value, float* dst, std::size_t n, const char* name) {
+                if (!value) return;
+                if (value->kind!=Json::Kind::Array || value->size()!=n)
+                    throw std::runtime_error(std::string("glTF material ")+name+" must be an array of "+std::to_string(n)+" numbers");
+                for (std::size_t k=0;k<n;++k) {
+                    const double v=value->at(k).numeric();
+                    if (!std::isfinite(v)) throw std::runtime_error(std::string("glTF material ")+name+" contains non-finite value");
+                    dst[k]=static_cast<float>(v);
+                }
+            };
+            readFactor(pbr->get("baseColorFactor"),materials[mi].base,4,"baseColorFactor");
+            if (const auto* v=pbr->get("metallicFactor")) materials[mi].metallic=static_cast<float>(v->numeric());
+            if (const auto* v=pbr->get("roughnessFactor")) materials[mi].roughness=static_cast<float>(v->numeric());
+            materials[mi].metallic=std::clamp(materials[mi].metallic,0.0f,1.0f);
+            materials[mi].roughness=std::clamp(materials[mi].roughness,0.0f,1.0f);
+            for (float& v : materials[mi].base) v=std::clamp(v,0.0f,1.0f);
+        }
+    }
     const auto& meshes=detail::required(root,"meshes");GltfMeshDocument out;
     for(std::size_t mi=0;mi<meshes.size();++mi){
         const auto& mesh=meshes.at(mi);const auto& prims=detail::required(mesh,"primitives");
@@ -141,7 +168,14 @@ inline GltfMeshDocument readGlbMeshes(const std::vector<std::uint8_t>& bytes) {
                 for(std::size_t i=0;i<ic;++i){const auto at=io+i*is;std::uint32_t value=0;if(type==5121)value=container.binary.at(at);else if(type==5123)value=std::uint32_t(container.binary.at(at))|(std::uint32_t(container.binary.at(at+1))<<8);else value=detail::u32(container.binary,at);if(value>=posCount)throw std::runtime_error("glTF index exceeds POSITION accessor");result.indices.push_back(value);}
             } else {result.indices.resize(posCount);for(std::size_t i=0;i<posCount;++i)result.indices[i]=static_cast<std::uint32_t>(i);}
             if(result.indices.size()%3!=0)throw std::runtime_error("glTF triangle index count is not divisible by three");
-            if(const auto* mat=p.get("material"))result.material=mat->index();
+            if(const auto* mat=p.get("material")) {
+                result.material=mat->index();
+                if (result.material>=materials.size()) throw std::runtime_error("glTF primitive references a missing material");
+                const auto& factors=materials[result.material];
+                std::copy(factors.base,factors.base+4,result.baseColorFactor);
+                result.metallicFactor=factors.metallic;
+                result.roughnessFactor=factors.roughness;
+            }
             out.primitives.push_back(std::move(result));
         }
     }
