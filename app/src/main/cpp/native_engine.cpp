@@ -8,6 +8,7 @@
 #include "scene/scene.hpp"
 #include "render/forward_plus.hpp"
 #include "assets/glb_reader.hpp"
+#include "assets/gltf_mesh_reader.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
