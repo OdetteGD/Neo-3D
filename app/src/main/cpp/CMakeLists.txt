@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(neo3d LANGUAGES CXX)
 
+# Keep the NDK shared C++ runtime explicit for APK packaging.
+set(CMAKE_ANDROID_STL_TYPE c++_shared)
+
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
