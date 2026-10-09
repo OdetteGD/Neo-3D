@@ -10,7 +10,7 @@ Neo-3D is an Android-native C++20 Vulkan renderer project with an interactive to
 - GLSL vertex and fragment shaders compiled to SPIR-V during the Android native build and embedded into the shared library.
 - Metallic-roughness GGX-style direct-light shading with Fresnel and tone mapping.
 - Touch drag orbit, auto-rotation toggle and reset-view controls.
-- Scene/entity/transform/material data structures, a GLB v2 container reader, and CPU screen-tile light assignment code.
+- Scene/entity/transform/material data structures, a GLB v2 container reader, a dependency-free glTF JSON/accessor decoder for triangle primitives (POSITION, optional NORMAL, and unsigned indices), and CPU screen-tile light assignment code.
 
 ## Build
 
@@ -36,4 +36,4 @@ The GitHub Actions workflow installs the native toolchain, compiles GLSL into SP
 
 ## Not yet complete
 
-This is an actively developing engine foundation, not yet a production-complete mobile editor. GLB parsing is not yet connected to GPU mesh upload; the current PBR shader uses a hard-coded material/light; the CPU tile assignment is not yet connected to GPU clustered/Forward+ shading. Shadow maps, image-based lighting, texture sampling, HDR off-screen rendering/bloom, a complete material/scene inspector, scene serialization, asset import UI, and performance/device testing remain to be integrated and verified. Treat APK build status as verified only after a successful GitHub Actions run.
+This is an actively developing engine foundation, not yet a production-complete mobile editor. The new glTF mesh decoder is compiled into the native target but is **not yet connected to the Android file picker or Vulkan GPU mesh upload/draw path**, so imported GLB models will not appear yet. The current PBR shader uses a hard-coded material/light; the CPU tile assignment is not yet connected to GPU clustered/Forward+ shading. Shadow maps, image-based lighting, texture sampling, HDR off-screen rendering/bloom, a complete material/scene inspector, scene serialization, asset import UI, and performance/device testing remain to be integrated and verified. Treat APK build status as verified only after a successful GitHub Actions run.
