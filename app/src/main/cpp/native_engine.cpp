@@ -155,7 +155,7 @@ static Mat4 inverseMat4(const Mat4& m) {
 }
 
 // -----------------------------------------------------------------------------
-// Physics Box & Character Controller (NAAYOS NA ANG HORIZONTAL COLLISION)
+// Physics Entities & Character Controller (May Step-Height Ground Offset)
 // -----------------------------------------------------------------------------
 struct PhysicsBox {
     AABB box;
@@ -194,7 +194,7 @@ public:
         Vec3 forward = {sinY, 0.0f, -cosY};
         Vec3 right = {cosY, 0.0f, sinY};
 
-        float speed = 7.5f; // Maliksi at makinis na movement speed
+        float speed = 7.5f;
         Vec3 targetMove = (forward * inputY + right * inputX) * speed;
 
         velocity.x = targetMove.x;
@@ -204,19 +204,18 @@ public:
         velocity.y += kGravity * dt;
         if (velocity.y < -32.0f) velocity.y = -32.0f;
 
-        // STEP-HEIGHT AABB FIX:
-        // Hindi haharangin ng sahig ang horizontal movement kung mas mababa ito kaysa sa step-offset
+        // Iniiwasang ituring na pader ang sahig na tinatapakan
         const float stepHeight = 0.35f;
 
         // 1. Horizontal X Check
         Vec3 stepX = position;
         stepX.x += velocity.x * dt;
         AABB boxX = getAABB(stepX);
-        boxX.min.y += stepHeight; // Bawal mag-collide sa tinatapakan
+        boxX.min.y += stepHeight;
 
         bool colX = false;
         for (const auto& c : colliders) {
-            if (c.isWater) continue; // Pwedeng lumusong sa tubig
+            if (c.isWater) continue;
             if (boxX.intersects(c.box)) { colX = true; break; }
         }
         if (!colX) position.x = stepX.x;
@@ -249,11 +248,11 @@ public:
             for (const auto& c : colliders) {
                 if (c.isWater) continue;
                 if (boxY.intersects(c.box)) {
-                    if (velocity.y < 0.0f) { // Pagbagsak sa platform
+                    if (velocity.y < 0.0f) {
                         position.y = c.box.max.y;
                         velocity.y = 0.0f;
                         isGrounded = true;
-                    } else if (velocity.y > 0.0f) { // Pag-untog sa ceiling
+                    } else if (velocity.y > 0.0f) {
                         position.y = c.box.min.y - height;
                         velocity.y = 0.0f;
                     }
@@ -498,7 +497,7 @@ private:
         // 2. Realistic PBR Water Lake (Sa tabi ng player, may depth)
         worldBoxes_.push_back({{{10.0f, -0.45f, -25.0f}, {35.0f, 0.05f, 5.0f}}, {0.05f, 0.45f, 0.75f, 0.9f}, 0.02f, 0.02f, true});
 
-        // 3. Jumpable Stairs & Platforms (Height = 0.35 each para swabe akyatin)
+        // 3. Jumpable Stairs & Platforms
         for (int i = 0; i < 8; ++i) {
             float h = (i + 1) * 0.35f;
             float z = -2.0f - (i * 1.2f);
@@ -932,7 +931,8 @@ private:
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;
         VkPipelineColorBlendStateCreateInfo bs{};
-        bs.sType = VK_STRUCTURE_TYPE_COLOR_BLEND_STATE_CREATE_INFO;
+        // NAAYOS NA: VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+        bs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         bs.attachmentCount = 1; bs.pAttachments = &ba;
 
         VkGraphicsPipelineCreateInfo pi{};
@@ -1006,7 +1006,8 @@ private:
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;
         VkPipelineColorBlendStateCreateInfo bs{};
-        bs.sType = VK_STRUCTURE_TYPE_COLOR_BLEND_STATE_CREATE_INFO;
+        // NAAYOS NA: VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+        bs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         bs.attachmentCount = 1; bs.pAttachments = &ba;
 
         VkGraphicsPipelineCreateInfo pi{};
@@ -1127,7 +1128,7 @@ private:
             vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
         }
 
-        // 4. PBR World Chunks Pass (Terrain & Water)
+        // 4. PBR World Chunks Pass
         vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
         VkDeviceSize offset = 0;
@@ -1157,7 +1158,7 @@ private:
             push.material[0] = b.metallic;
             push.material[1] = b.roughness;
             push.material[2] = 1.0f;
-            push.material[3] = b.isWater ? 1.0f : 0.0f; // Material flag para sa Water Shader
+            push.material[3] = b.isWater ? 1.0f : 0.0f;
 
             vkCmdPushConstants(
                 commandBuffers_[i],
