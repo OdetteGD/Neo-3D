@@ -76,6 +76,7 @@ private:
     VkRenderPass renderPass_=VK_NULL_HANDLE; std::vector<VkFramebuffer> framebuffers_;
     VkCommandPool commandPool_=VK_NULL_HANDLE; std::vector<VkCommandBuffer> commandBuffers_;
     VkPipelineLayout pipelineLayout_=VK_NULL_HANDLE; VkPipeline pipeline_=VK_NULL_HANDLE;
+    VkPipelineLayout skyPipelineLayout_=VK_NULL_HANDLE; VkPipeline skyPipeline_=VK_NULL_HANDLE;
     VkBuffer vertexBuffer_=VK_NULL_HANDLE,indexBuffer_=VK_NULL_HANDLE;
     VkDeviceMemory vertexMemory_=VK_NULL_HANDLE,indexMemory_=VK_NULL_HANDLE;
     uint32_t indexCount_=0;
@@ -93,7 +94,7 @@ private:
         check(vkCreateInstance(&ci,nullptr,&instance_),"vkCreateInstance");
         VkAndroidSurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};si.window=window_;
         check(vkCreateAndroidSurfaceKHR(instance_,&si,nullptr,&surface_),"vkCreateAndroidSurfaceKHR");
-        selectDevice();createDevice();createGeometry();createSwapchain();chooseDepthFormat();createRenderPass();createDepthResources();createFramebuffers();createCommands();createGraphicsPipeline();createSync();
+        selectDevice();createDevice();createGeometry();createSwapchain();chooseDepthFormat();createRenderPass();createDepthResources();createFramebuffers();createCommands();createGraphicsPipeline();createSkyPipeline();createSync();
         status_="Vulkan 3D | "+deviceName_+" | "+std::to_string(extent_.width)+"x"+std::to_string(extent_.height)+" | Vulkan geometry + depth + GGX PBR + blue-sky clear";
         LOGI("%s",status_.c_str());
     }
@@ -196,12 +197,34 @@ private:
         framebuffers_.resize(views_.size());for(size_t i=0;i<views_.size();++i){VkImageView atts[]={views_[i],depthViews_[i]};VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};ci.renderPass=renderPass_;ci.attachmentCount=2;ci.pAttachments=atts;ci.width=extent_.width;ci.height=extent_.height;ci.layers=1;check(vkCreateFramebuffer(device_,&ci,nullptr,&framebuffers_[i]),"vkCreateFramebuffer");}
     }
     void createCommands(){VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pi.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;pi.queueFamilyIndex=graphicsFamily_;check(vkCreateCommandPool(device_,&pi,nullptr,&commandPool_),"vkCreateCommandPool");commandBuffers_.resize(framebuffers_.size());VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ai.commandPool=commandPool_;ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=static_cast<uint32_t>(commandBuffers_.size());check(vkAllocateCommandBuffers(device_,&ai,commandBuffers_.data()),"vkAllocateCommandBuffers");}
+    void createSkyPipeline(){
+        VkShaderModule vert=shader(kSkyVert,kSkyVertSize),frag=shader(kSkyFrag,kSkyFragSize);
+        try {
+            VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            check(vkCreatePipelineLayout(device_,&li,nullptr,&skyPipelineLayout_),"vkCreatePipelineLayout(sky)");
+            std::array<VkPipelineShaderStageCreateInfo,2> stages{};
+            stages[0]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}; stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT; stages[0].module=vert; stages[0].pName="main";
+            stages[1]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}; stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module=frag; stages[1].pName="main";
+            VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+            VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkViewport vp{0,0,static_cast<float>(extent_.width),static_cast<float>(extent_.height),0,1}; VkRect2D sc{{0,0},extent_};
+            VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; vsi.viewportCount=1; vsi.pViewports=&vp; vsi.scissorCount=1; vsi.pScissors=&sc;
+            VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO}; rs.polygonMode=VK_POLYGON_MODE_FILL; rs.cullMode=VK_CULL_MODE_NONE; rs.lineWidth=1.0f;
+            VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO}; ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO}; ds.depthTestEnable=VK_FALSE; ds.depthWriteEnable=VK_FALSE;
+            VkPipelineColorBlendAttachmentState ba{}; ba.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO}; bs.attachmentCount=1; bs.pAttachments=&ba;
+            VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO}; pi.stageCount=2; pi.pStages=stages.data(); pi.pVertexInputState=&vi; pi.pInputAssemblyState=&ia; pi.pViewportState=&vsi; pi.pRasterizationState=&rs; pi.pMultisampleState=&ms; pi.pDepthStencilState=&ds; pi.pColorBlendState=&bs; pi.layout=skyPipelineLayout_; pi.renderPass=renderPass_;
+            check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pi,nullptr,&skyPipeline_),"vkCreateGraphicsPipelines(sky)");
+        } catch(...) { if(vert)vkDestroyShaderModule(device_,vert,nullptr); if(frag)vkDestroyShaderModule(device_,frag,nullptr); throw; }
+        vkDestroyShaderModule(device_,vert,nullptr); vkDestroyShaderModule(device_,frag,nullptr);
+    }
     void createSync(){VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fi.flags=VK_FENCE_CREATE_SIGNALED_BIT;for(size_t i=0;i<kFrames;++i){check(vkCreateSemaphore(device_,&si,nullptr,&imageAvailable_[i]),"vkCreateSemaphore");check(vkCreateSemaphore(device_,&si,nullptr,&renderFinished_[i]),"vkCreateSemaphore");check(vkCreateFence(device_,&fi,nullptr,&fences_[i]),"vkCreateFence");}}
     void record(uint32_t i){
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};check(vkBeginCommandBuffer(commandBuffers_[i],&bi),"vkBeginCommandBuffer");
         VkClearValue clears[2]{};clears[0].color={{0.16f,0.48f,0.78f,1.0f}};clears[1].depthStencil={1.0f,0};
         VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};rp.renderPass=renderPass_;rp.framebuffer=framebuffers_[i];rp.renderArea={{0,0},extent_};rp.clearValueCount=2;rp.pClearValues=clears;
-        vkCmdBeginRenderPass(commandBuffers_[i],&rp,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(commandBuffers_[i],VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
+        vkCmdBeginRenderPass(commandBuffers_[i],&rp,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(commandBuffers_[i],VK_PIPELINE_BIND_POINT_GRAPHICS,skyPipeline_);vkCmdDraw(commandBuffers_[i],3,1,0,0);vkCmdBindPipeline(commandBuffers_[i],VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
         VkDeviceSize offset=0;vkCmdBindVertexBuffers(commandBuffers_[i],0,1,&vertexBuffer_,&offset);vkCmdBindIndexBuffer(commandBuffers_[i],indexBuffer_,0,VK_INDEX_TYPE_UINT32);
         float t=std::chrono::duration<float>(std::chrono::steady_clock::now()-started_).count();
         float yaw=autoRotate_.load()?t*0.65f:yaw_.load();
@@ -250,12 +273,14 @@ private:
     }
     void rebuild(){
         if(!device_)return;vkDeviceWaitIdle(device_);destroySwapchain();
-        try{createSwapchain();chooseDepthFormat();createRenderPass();createDepthResources();createFramebuffers();createCommands();createGraphicsPipeline();status_="Vulkan 3D | "+deviceName_+" | "+std::to_string(extent_.width)+"x"+std::to_string(extent_.height)+" | indexed cube + depth + GGX PBR";}
+        try{createSwapchain();chooseDepthFormat();createRenderPass();createDepthResources();createFramebuffers();createCommands();createGraphicsPipeline();createSkyPipeline();status_="Vulkan 3D | "+deviceName_+" | "+std::to_string(extent_.width)+"x"+std::to_string(extent_.height)+" | indexed cube + depth + GGX PBR";}
         catch(const std::exception&e){status_=std::string("Swapchain rebuild failed: ")+e.what();LOGE("%s",status_.c_str());}
     }
     void destroySwapchain(){
         if(!device_)return;
         if(pipeline_)vkDestroyPipeline(device_,pipeline_,nullptr);pipeline_=VK_NULL_HANDLE;
+        if(skyPipeline_)vkDestroyPipeline(device_,skyPipeline_,nullptr);skyPipeline_=VK_NULL_HANDLE;
+        if(skyPipelineLayout_)vkDestroyPipelineLayout(device_,skyPipelineLayout_,nullptr);skyPipelineLayout_=VK_NULL_HANDLE;
         if(pipelineLayout_)vkDestroyPipelineLayout(device_,pipelineLayout_,nullptr);pipelineLayout_=VK_NULL_HANDLE;
         for(auto f:framebuffers_)if(f)vkDestroyFramebuffer(device_,f,nullptr);framebuffers_.clear();
         if(commandPool_)vkDestroyCommandPool(device_,commandPool_,nullptr);commandPool_=VK_NULL_HANDLE;commandBuffers_.clear();
