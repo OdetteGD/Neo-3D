@@ -180,8 +180,15 @@ public:
             }
 
             const float scale = 2.4f / span;
+            std::vector<DrawRange> ranges;
             for (const auto& p : decoded.primitives) {
                 const auto base = static_cast<std::uint32_t>(vertices.size());
+                DrawRange range{};
+                range.firstIndex = static_cast<uint32_t>(indices.size());
+                range.indexCount = static_cast<uint32_t>(p.indices.size());
+                std::copy(p.baseColorFactor, p.baseColorFactor + 4, range.baseColor);
+                range.metallic = p.metallicFactor;
+                range.roughness = p.roughnessFactor;
                 for (const auto& v : p.vertices) {
                     Vertex out{};
                     for (int k = 0; k < 3; ++k) {
@@ -191,6 +198,7 @@ public:
                     vertices.push_back(out);
                 }
                 for (auto index : p.indices) indices.push_back(base + index);
+                ranges.push_back(range);
             }
 
             std::lock_guard<std::mutex> lock(gpuMutex_);
@@ -207,6 +215,7 @@ public:
             createBuffer(vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBuffer_, vertexMemory_, vertices.data());
             createBuffer(indices.size() * sizeof(std::uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBuffer_, indexMemory_, indices.data());
             indexCount_ = static_cast<std::uint32_t>(indices.size());
+            importedRanges_ = std::move(ranges);
             importedModel_ = true;
 
             status_ = "GLB loaded | " + std::to_string(decoded.primitives.size()) + " primitive(s) | " + std::to_string(vertexTotal) + " vertices | " + deviceName_;
@@ -246,6 +255,8 @@ private:
     VkBuffer vertexBuffer_ = VK_NULL_HANDLE, indexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory vertexMemory_ = VK_NULL_HANDLE, indexMemory_ = VK_NULL_HANDLE;
     uint32_t indexCount_ = 0;
+    struct DrawRange { uint32_t firstIndex=0, indexCount=0; float baseColor[4]{1,1,1,1}; float metallic=1, roughness=1; };
+    std::vector<DrawRange> importedRanges_;
 
     static constexpr size_t kFrames = 2;
     std::array<VkSemaphore, kFrames> imageAvailable_{};
@@ -623,9 +634,9 @@ private:
         VkShaderModule frag = shader(kMeshFrag, kMeshFragSize);
         try {
             VkPushConstantRange range{};
-            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
             range.offset = 0;
-            range.size = sizeof(Mat4) * 2;
+            range.size = sizeof(Mat4) * 2 + sizeof(float) * 8;
 
             VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             li.pushConstantRangeCount = 1;
@@ -859,22 +870,27 @@ private:
         Mat4 view = translate(0, 0, -5.0f);
         Mat4 projection = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
 
-        struct Push { Mat4 mvp; Mat4 model; };
+        struct Push { Mat4 mvp; Mat4 model; float baseColor[4]; float material[4]; };
 
         if (importedModel_) {
             Mat4 model = multiply(rotateY(yaw), rotateX(pitch_.load()));
             Mat4 mvp = multiply(projection, multiply(view, model));
-            Push push{mvp, model};
-            vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
-            vkCmdDrawIndexed(commandBuffers_[i], indexCount_, 1, 0, 0, 0);
+            for (const auto& range : importedRanges_) {
+                Push push{mvp, model, {}, {}};
+                std::copy(range.baseColor, range.baseColor + 4, push.baseColor);
+                push.material[0] = range.metallic;
+                push.material[1] = range.roughness;
+                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+                vkCmdDrawIndexed(commandBuffers_[i], range.indexCount, 1, range.firstIndex, 0, 0);
+            }
         } else {
             const float positions[3] = {-1.55f, 0.0f, 1.55f};
             for (int object = 0; object < 3; ++object) {
                 Mat4 local = multiply(rotateY(yaw + (object - 1) * 0.45f), rotateX(pitch_.load() + (object - 1) * 0.12f));
                 Mat4 model = multiply(translate(positions[object], object == 1 ? 0.0f : -0.12f, 0.0f), local);
                 Mat4 mvp = multiply(projection, multiply(view, model));
-                Push push{mvp, model};
-                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+                Push push{mvp, model, {0.16f, 0.58f, 0.92f, 1.0f}, {0.18f, 0.32f, 0.0f, 0.0f}};
+                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
                 vkCmdDrawIndexed(commandBuffers_[i], indexCount_, 1, 0, 0, 0);
             }
         }
