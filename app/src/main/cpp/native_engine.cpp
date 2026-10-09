@@ -33,9 +33,6 @@ static void check(VkResult r, const char* op) {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Math, Quaternions & Transforms (Full Skeletal Animation Support)
-// -----------------------------------------------------------------------------
 struct Vec3 {
     float x{0.0f}, y{0.0f}, z{0.0f};
 
@@ -47,39 +44,6 @@ struct Vec3 {
     Vec3 normalized() const {
         float l = length();
         return l > 1e-6f ? Vec3{x / l, y / l, z / l} : Vec3{0, 0, 0};
-    }
-};
-
-struct Quat {
-    float x{0.0f}, y{0.0f}, z{0.0f}, w{1.0f};
-
-    static Quat identity() { return {0.0f, 0.0f, 0.0f, 1.0f}; }
-
-    static Quat slerp(const Quat& q1, Quat q2, float t) {
-        float cosHalfTheta = q1.x * q2.x + q1.y * q2.y + q1.z * q2.z + q1.w * q2.w;
-        if (cosHalfTheta < 0.0f) {
-            q2.x = -q2.x; q2.y = -q2.y; q2.z = -q2.z; q2.w = -q2.w;
-            cosHalfTheta = -cosHalfTheta;
-        }
-        if (std::abs(cosHalfTheta) >= 1.0f) return q1;
-        float halfTheta = std::acos(cosHalfTheta);
-        float sinHalfTheta = std::sqrt(1.0f - cosHalfTheta * cosHalfTheta);
-        if (std::abs(sinHalfTheta) < 0.001f) {
-            return {
-                q1.x * 0.5f + q2.x * 0.5f,
-                q1.y * 0.5f + q2.y * 0.5f,
-                q1.z * 0.5f + q2.z * 0.5f,
-                q1.w * 0.5f + q2.w * 0.5f
-            };
-        }
-        float ratioA = std::sin((1.0f - t) * halfTheta) / sinHalfTheta;
-        float ratioB = std::sin(t * halfTheta) / sinHalfTheta;
-        return {
-            q1.x * ratioA + q2.x * ratioB,
-            q1.y * ratioA + q2.y * ratioB,
-            q1.z * ratioA + q2.z * ratioB,
-            q1.w * ratioA + q2.w * ratioB
-        };
     }
 };
 
@@ -126,7 +90,7 @@ static Mat4 perspective(float aspect) {
     const float nearP = 0.05f, farP = 250.0f;
     Mat4 m{};
     m.v[0] = f / std::max(aspect, 0.01f);
-    m.v[5] = -f; // Vulkan inverted Y
+    m.v[5] = -f; // Inverted Y para sa Vulkan
     m.v[10] = farP / (nearP - farP);
     m.v[11] = -1.0f;
     m.v[14] = (farP * nearP) / (nearP - farP);
@@ -142,23 +106,6 @@ static Mat4 translate(float x, float y, float z) {
 static Mat4 scale(float sx, float sy, float sz) {
     Mat4 m = identity();
     m.v[0] = sx; m.v[5] = sy; m.v[10] = sz;
-    return m;
-}
-
-static Mat4 quatToMat4(const Quat& q) {
-    Mat4 m = identity();
-    float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
-    float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
-    float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
-    m.v[0] = 1.0f - 2.0f * (yy + zz);
-    m.v[1] = 2.0f * (xy + wz);
-    m.v[2] = 2.0f * (xz - wy);
-    m.v[4] = 2.0f * (xy - wz);
-    m.v[5] = 1.0f - 2.0f * (xx + zz);
-    m.v[6] = 2.0f * (yz + wx);
-    m.v[8] = 2.0f * (xz + wy);
-    m.v[9] = 2.0f * (yz - wx);
-    m.v[10] = 1.0f - 2.0f * (xx + yy);
     return m;
 }
 
@@ -208,18 +155,19 @@ static Mat4 inverseMat4(const Mat4& m) {
 }
 
 // -----------------------------------------------------------------------------
-// Physics Character Controller & Collision Entities
+// Physics Box & Character Controller (NAAYOS NA ANG HORIZONTAL COLLISION)
 // -----------------------------------------------------------------------------
 struct PhysicsBox {
     AABB box;
     float color[4];
     float metallic;
     float roughness;
+    bool isWater{false};
 };
 
 class CharacterController {
 public:
-    Vec3 position{0.0f, 2.0f, 5.0f};
+    Vec3 position{0.0f, 1.5f, 6.0f};
     Vec3 velocity{0.0f, 0.0f, 0.0f};
     bool isGrounded{false};
     float eyeHeight{1.72f};
@@ -235,7 +183,7 @@ public:
 
     void jump() {
         if (isGrounded) {
-            velocity.y = 7.5f;
+            velocity.y = 8.2f;
             isGrounded = false;
         }
     }
@@ -246,34 +194,47 @@ public:
         Vec3 forward = {sinY, 0.0f, -cosY};
         Vec3 right = {cosY, 0.0f, sinY};
 
-        float speed = 6.8f;
+        float speed = 7.5f; // Maliksi at makinis na movement speed
         Vec3 targetMove = (forward * inputY + right * inputX) * speed;
 
         velocity.x = targetMove.x;
         velocity.z = targetMove.z;
 
-        const float kGravity = -18.5f;
+        const float kGravity = -20.0f;
         velocity.y += kGravity * dt;
-        if (velocity.y < -30.0f) velocity.y = -30.0f;
+        if (velocity.y < -32.0f) velocity.y = -32.0f;
 
+        // STEP-HEIGHT AABB FIX:
+        // Hindi haharangin ng sahig ang horizontal movement kung mas mababa ito kaysa sa step-offset
+        const float stepHeight = 0.35f;
+
+        // 1. Horizontal X Check
         Vec3 stepX = position;
         stepX.x += velocity.x * dt;
         AABB boxX = getAABB(stepX);
+        boxX.min.y += stepHeight; // Bawal mag-collide sa tinatapakan
+
         bool colX = false;
         for (const auto& c : colliders) {
+            if (c.isWater) continue; // Pwedeng lumusong sa tubig
             if (boxX.intersects(c.box)) { colX = true; break; }
         }
         if (!colX) position.x = stepX.x;
 
+        // 2. Horizontal Z Check
         Vec3 stepZ = position;
         stepZ.z += velocity.z * dt;
         AABB boxZ = getAABB(stepZ);
+        boxZ.min.y += stepHeight;
+
         bool colZ = false;
         for (const auto& c : colliders) {
+            if (c.isWater) continue;
             if (boxZ.intersects(c.box)) { colZ = true; break; }
         }
         if (!colZ) position.z = stepZ.z;
 
+        // 3. Vertical Y Check
         Vec3 stepY = position;
         stepY.y += velocity.y * dt;
         AABB boxY = getAABB(stepY);
@@ -286,12 +247,13 @@ public:
         } else {
             bool colY = false;
             for (const auto& c : colliders) {
+                if (c.isWater) continue;
                 if (boxY.intersects(c.box)) {
-                    if (velocity.y < 0.0f) {
+                    if (velocity.y < 0.0f) { // Pagbagsak sa platform
                         position.y = c.box.max.y;
                         velocity.y = 0.0f;
                         isGrounded = true;
-                    } else if (velocity.y > 0.0f) {
+                    } else if (velocity.y > 0.0f) { // Pag-untog sa ceiling
                         position.y = c.box.min.y - height;
                         velocity.y = 0.0f;
                     }
@@ -309,7 +271,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// Vulkan Renderer & Dynamic Model Animator
+// Vulkan Renderer Engine
 // -----------------------------------------------------------------------------
 class VulkanRenderer {
 public:
@@ -366,7 +328,7 @@ public:
 
     void resetView() {
         std::lock_guard<std::mutex> lock(physicsMutex_);
-        player_.position = {0.0f, 2.0f, 6.0f};
+        player_.position = {0.0f, 1.5f, 6.0f};
         player_.velocity = {0.0f, 0.0f, 0.0f};
         yaw_.store(0.0f);
         pitch_.store(-0.1f);
@@ -374,7 +336,6 @@ public:
 
     std::string loadGlb(const std::vector<std::uint8_t>& bytes) {
         try {
-            // Diretso itong tumatawag sa inline function ng iyong gltf_mesh_reader.hpp!
             auto decoded = assets::readGlbMeshes(bytes);
 
             std::size_t vertexTotal = 0, indexTotal = 0;
@@ -434,16 +395,12 @@ public:
             if (glbVertexMemory_) vkFreeMemory(device_, glbVertexMemory_, nullptr);
             if (glbIndexMemory_) vkFreeMemory(device_, glbIndexMemory_, nullptr);
 
-            // CPU vertex cache para sa dynamic animations
-            baseGlbVertices_ = vertices;
-            animatedGlbVertices_ = vertices;
-
             createBuffer(vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, glbVertexBuffer_, glbVertexMemory_, vertices.data());
             createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, glbIndexBuffer_, glbIndexMemory_, indices.data());
             glbRanges_ = std::move(ranges);
             hasGlbModel_ = true;
 
-            status_ = "GLB Loaded (" + std::to_string(vertexTotal) + " verts | Animated Ready)";
+            status_ = "GLB Imported (" + std::to_string(vertexTotal) + " verts)";
             LOGI("%s", status_.c_str());
             return status_;
         } catch (const std::exception& e) {
@@ -479,16 +436,12 @@ private:
     VkPipelineLayout skyPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline skyPipeline_ = VK_NULL_HANDLE;
 
-    // Static Cube Geometry
     VkBuffer cubeVertexBuffer_ = VK_NULL_HANDLE, cubeIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory cubeVertexMemory_ = VK_NULL_HANDLE, cubeIndexMemory_ = VK_NULL_HANDLE;
     uint32_t cubeIndexCount_ = 0;
 
-    // GLB Geometry & Dynamic Animation Cache
     VkBuffer glbVertexBuffer_ = VK_NULL_HANDLE, glbIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory glbVertexMemory_ = VK_NULL_HANDLE, glbIndexMemory_ = VK_NULL_HANDLE;
-    std::vector<Vertex> baseGlbVertices_;
-    std::vector<Vertex> animatedGlbVertices_;
     bool hasGlbModel_ = false;
 
     struct DrawRange {
@@ -507,14 +460,12 @@ private:
     std::atomic<bool> running_{false}, resizeRequested_{false}, jumpRequested_{false};
     std::mutex gpuMutex_, physicsMutex_, lifecycleMutex_;
 
-    // FPS Camera & Physics Controllers
     CharacterController player_;
     std::vector<PhysicsBox> worldBoxes_;
     std::atomic<float> yaw_{0.0f}, pitch_{-0.1f};
     std::atomic<float> inputX_{0.0f}, inputY_{0.0f};
 
-    // Environmental Engine Parameters
-    std::atomic<float> fogDensity_{0.045f};
+    std::atomic<float> fogDensity_{0.035f};
     std::atomic<float> timeOfDay_{14.0f};
     std::atomic<float> exposure_{1.0f};
 
@@ -541,17 +492,25 @@ private:
 
     void buildWorldChunks() {
         worldBoxes_.clear();
-        worldBoxes_.push_back({{{-60.0f, -1.0f, -60.0f}, {60.0f, 0.0f, 60.0f}}, {0.22f, 0.28f, 0.24f, 1.0f}, 0.05f, 0.90f});
+        // 1. Concrete Ground Floor (Floor level 0.0)
+        worldBoxes_.push_back({{{-50.0f, -1.0f, -50.0f}, {50.0f, 0.0f, 50.0f}}, {0.45f, 0.48f, 0.44f, 1.0f}, 0.05f, 0.85f, false});
 
-        for (int i = 0; i < 7; ++i) {
-            float h = (i + 1) * 0.45f;
+        // 2. Realistic PBR Water Lake (Sa tabi ng player, may depth)
+        worldBoxes_.push_back({{{10.0f, -0.45f, -25.0f}, {35.0f, 0.05f, 5.0f}}, {0.05f, 0.45f, 0.75f, 0.9f}, 0.02f, 0.02f, true});
+
+        // 3. Jumpable Stairs & Platforms (Height = 0.35 each para swabe akyatin)
+        for (int i = 0; i < 8; ++i) {
+            float h = (i + 1) * 0.35f;
             float z = -2.0f - (i * 1.2f);
-            worldBoxes_.push_back({{{-1.5f, 0.0f, z - 0.6f}, {1.5f, h, z + 0.6f}}, {0.65f, 0.58f, 0.48f, 1.0f}, 0.15f, 0.75f});
+            worldBoxes_.push_back({{{-1.8f, 0.0f, z - 0.6f}, {1.8f, h, z + 0.6f}}, {0.68f, 0.62f, 0.52f, 1.0f}, 0.15f, 0.70f, false});
         }
 
-        worldBoxes_.push_back({{{-6.0f, 3.15f, -18.0f}, {6.0f, 3.55f, -8.0f}}, {0.35f, 0.45f, 0.60f, 1.0f}, 0.40f, 0.35f});
-        worldBoxes_.push_back({{{-7.0f, 0.0f, -6.0f}, {-5.0f, 7.0f, -4.0f}}, {0.95f, 0.85f, 0.30f, 1.0f}, 0.95f, 0.15f});
-        worldBoxes_.push_back({{{5.0f, 0.0f, -6.0f}, {7.0f, 7.0f, -4.0f}}, {0.92f, 0.92f, 0.95f, 1.0f}, 0.98f, 0.08f});
+        // 4. Elevated Golden Hub Platform
+        worldBoxes_.push_back({{{-6.0f, 2.80f, -18.0f}, {6.0f, 3.15f, -9.0f}}, {0.95f, 0.78f, 0.28f, 1.0f}, 0.95f, 0.15f, false});
+
+        // 5. Metallic Chrome Pillars
+        worldBoxes_.push_back({{{-8.0f, 0.0f, -6.0f}, {-6.0f, 8.0f, -4.0f}}, {0.92f, 0.92f, 0.95f, 1.0f}, 0.98f, 0.05f, false});
+        worldBoxes_.push_back({{{6.0f, 0.0f, -6.0f}, {8.0f, 8.0f, -4.0f}}, {0.20f, 0.70f, 0.88f, 1.0f}, 0.85f, 0.12f, false});
     }
 
     void initialize() {
@@ -973,7 +932,7 @@ private:
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;
         VkPipelineColorBlendStateCreateInfo bs{};
-        bs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        bs.sType = VK_STRUCTURE_TYPE_COLOR_BLEND_STATE_CREATE_INFO;
         bs.attachmentCount = 1; bs.pAttachments = &ba;
 
         VkGraphicsPipelineCreateInfo pi{};
@@ -1047,7 +1006,7 @@ private:
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;
         VkPipelineColorBlendStateCreateInfo bs{};
-        bs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        bs.sType = VK_STRUCTURE_TYPE_COLOR_BLEND_STATE_CREATE_INFO;
         bs.attachmentCount = 1; bs.pAttachments = &ba;
 
         VkGraphicsPipelineCreateInfo pi{};
@@ -1081,39 +1040,6 @@ private:
         }
     }
 
-    // -------------------------------------------------------------------------
-    // GLB Skeletal Animation & Mesh Deformation Update Loop
-    // -------------------------------------------------------------------------
-    void updateModelAnimations(float animTime) {
-        if (!hasGlbModel_ || baseGlbVertices_.empty() || !glbVertexMemory_) return;
-
-        // Dynamic multi-bone skeletal wave motion & joint interpolation
-        float freq = animTime * 3.14159f;
-        for (size_t idx = 0; idx < baseGlbVertices_.size(); ++idx) {
-            const auto& base = baseGlbVertices_[idx];
-            auto& anim = animatedGlbVertices_[idx];
-
-            float heightWeight = std::clamp(base.position[1] * 0.45f, 0.0f, 1.0f);
-            float deformX = std::sin(freq + base.position[1] * 2.5f) * 0.065f * heightWeight;
-            float deformZ = std::cos(freq * 0.8f + base.position[1] * 2.0f) * 0.045f * heightWeight;
-
-            anim.position[0] = base.position[0] + deformX;
-            anim.position[1] = base.position[1];
-            anim.position[2] = base.position[2] + deformZ;
-
-            anim.normal[0] = base.normal[0];
-            anim.normal[1] = base.normal[1];
-            anim.normal[2] = base.normal[2];
-        }
-
-        void* mapped = nullptr;
-        VkResult r = vkMapMemory(device_, glbVertexMemory_, 0, animatedGlbVertices_.size() * sizeof(Vertex), 0, &mapped);
-        if (r == VK_SUCCESS && mapped) {
-            std::memcpy(mapped, animatedGlbVertices_.data(), animatedGlbVertices_.size() * sizeof(Vertex));
-            vkUnmapMemory(device_, glbVertexMemory_);
-        }
-    }
-
     void record(uint32_t i, float dt) {
         VkCommandBufferBeginInfo bi{};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1143,7 +1069,7 @@ private:
 
         float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
 
-        // 1. Physics Step
+        // 1. Physics Engine Step
         {
             std::lock_guard<std::mutex> lock(physicsMutex_);
             if (jumpRequested_.exchange(false)) {
@@ -1201,7 +1127,7 @@ private:
             vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
         }
 
-        // 4. PBR World Chunks Pass
+        // 4. PBR World Chunks Pass (Terrain & Water)
         vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
         VkDeviceSize offset = 0;
@@ -1231,7 +1157,7 @@ private:
             push.material[0] = b.metallic;
             push.material[1] = b.roughness;
             push.material[2] = 1.0f;
-            push.material[3] = 0.0f;
+            push.material[3] = b.isWater ? 1.0f : 0.0f; // Material flag para sa Water Shader
 
             vkCmdPushConstants(
                 commandBuffers_[i],
@@ -1244,10 +1170,8 @@ private:
             vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
         }
 
-        // 5. Dynamic Animated GLB Mesh Pass
+        // 5. Dynamic GLB Mesh Rendering
         if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
-            updateModelAnimations(t);
-
             vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
             vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
