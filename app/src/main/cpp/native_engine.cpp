@@ -5,23 +5,19 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
 #include "shader_blobs.hpp"
-#include "scene/scene.hpp"
-#include "render/forward_plus.hpp"
 #include "assets/glb_reader.hpp"
-#include "assets/gltf_mesh_reader.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <utility>
 #include <vector>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "Neo3D", __VA_ARGS__)
@@ -35,6 +31,34 @@ static void check(VkResult r, const char* op) {
         throw std::runtime_error(op);
     }
 }
+
+// -----------------------------------------------------------------------------
+// Math & Geometric Utilities
+// -----------------------------------------------------------------------------
+struct Vec3 {
+    float x{0.0f}, y{0.0f}, z{0.0f};
+
+    Vec3 operator+(const Vec3& o) const { return {x + o.x, y + o.y, z + o.z}; }
+    Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
+    Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
+    Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
+    float length() const { return std::sqrt(x * x + y * y + z * z); }
+    Vec3 normalized() const {
+        float l = length();
+        return l > 1e-6f ? Vec3{x / l, y / l, z / l} : Vec3{0, 0, 0};
+    }
+};
+
+struct AABB {
+    Vec3 min;
+    Vec3 max;
+
+    bool intersects(const AABB& o) const {
+        return (min.x <= o.max.x && max.x >= o.min.x) &&
+               (min.y <= o.max.y && max.y >= o.min.y) &&
+               (min.z <= o.max.z && max.z >= o.min.z);
+    }
+};
 
 struct Vertex {
     float position[3];
@@ -65,7 +89,7 @@ static Mat4 multiply(const Mat4& a, const Mat4& b) {
 
 static Mat4 perspective(float aspect) {
     const float f = 1.0f / std::tan(0.78539816339f * 0.5f);
-    const float nearP = 0.1f, farP = 150.0f;
+    const float nearP = 0.05f, farP = 250.0f;
     Mat4 m{};
     m.v[0] = f / std::max(aspect, 0.01f);
     m.v[5] = -f; // Vulkan inverted Y
@@ -81,46 +105,33 @@ static Mat4 translate(float x, float y, float z) {
     return m;
 }
 
+static Mat4 scale(float sx, float sy, float sz) {
+    Mat4 m = identity();
+    m.v[0] = sx; m.v[5] = sy; m.v[10] = sz;
+    return m;
+}
+
 static Mat4 rotateY(float a) {
     Mat4 m = identity();
     float c = std::cos(a), s = std::sin(a);
-    m.v[0] = c; m.v[2] = -s;
-    m.v[8] = s; m.v[10] = c;
+    m.v[0] = c;  m.v[2] = -s;
+    m.v[8] = s;  m.v[10] = c;
     return m;
 }
 
-static Mat4 rotateX(float a) {
-    Mat4 m = identity();
-    float c = std::cos(a), s = std::sin(a);
-    m.v[5] = c; m.v[6] = s;
-    m.v[9] = -s; m.v[10] = c;
-    return m;
-}
-
-// True 3D LookAt View Matrix (Standard in Unity, Godot, Unreal Engine)
-static Mat4 lookAt(float eyeX, float eyeY, float eyeZ, float targetX, float targetY, float targetZ, float upX, float upY, float upZ) {
-    float fx = targetX - eyeX, fy = targetY - eyeY, fz = targetZ - eyeZ;
-    float rlf = 1.0f / std::sqrt(fx*fx + fy*fy + fz*fz);
-    fx *= rlf; fy *= rlf; fz *= rlf;
-
-    float sx = fy * upZ - fz * upY;
-    float sy = fz * upX - fx * upZ;
-    float sz = fx * upY - fy * upX;
-    float rls = 1.0f / std::sqrt(sx*sx + sy*sy + sz*sz);
-    sx *= rls; sy *= rls; sz *= rls;
-
-    float ux = sy * fz - sz * fy;
-    float uy = sz * fx - sx * fz;
-    float uz = sx * fy - sy * fx;
+static Mat4 lookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
+    Vec3 f = (target - eye).normalized();
+    Vec3 s = {f.y * up.z - f.z * up.y, f.z * up.x - f.x * up.z, f.x * up.y - f.y * up.x};
+    s = s.normalized();
+    Vec3 u = {s.y * f.z - s.z * f.y, s.z * f.x - s.x * f.z, s.x * f.y - s.y * f.x};
 
     Mat4 m = identity();
-    m.v[0] = sx;  m.v[1] = ux;  m.v[2] = -fx; m.v[3] = 0.0f;
-    m.v[4] = sy;  m.v[5] = uy;  m.v[6] = -fy; m.v[7] = 0.0f;
-    m.v[8] = sz;  m.v[9] = uz;  m.v[10] = -fz; m.v[11] = 0.0f;
-    m.v[12] = -(sx * eyeX + sy * eyeY + sz * eyeZ);
-    m.v[13] = -(ux * eyeX + uy * eyeY + uz * eyeZ);
-    m.v[14] =  (fx * eyeX + fy * eyeY + fz * eyeZ);
-    m.v[15] = 1.0f;
+    m.v[0] = s.x;  m.v[1] = u.x;  m.v[2] = -f.x;
+    m.v[4] = s.y;  m.v[5] = u.y;  m.v[6] = -f.y;
+    m.v[8] = s.z;  m.v[9] = u.z;  m.v[10] = -f.z;
+    m.v[12] = -(s.x * eye.x + s.y * eye.y + s.z * eye.z);
+    m.v[13] = -(u.x * eye.x + u.y * eye.y + u.z * eye.z);
+    m.v[14] =  (f.x * eye.x + f.y * eye.y + f.z * eye.z);
     return m;
 }
 
@@ -153,10 +164,121 @@ static Mat4 inverseMat4(const Mat4& m) {
     return inv;
 }
 
+// -----------------------------------------------------------------------------
+// Physics Character Controller & Collision Entities
+// -----------------------------------------------------------------------------
+struct PhysicsBox {
+    AABB box;
+    float color[4];
+    float metallic;
+    float roughness;
+};
+
+class CharacterController {
+public:
+    Vec3 position{0.0f, 2.0f, 5.0f}; // Feet position
+    Vec3 velocity{0.0f, 0.0f, 0.0f};
+    bool isGrounded{false};
+    float eyeHeight{1.72f}; // FPS Camera offset
+    float radius{0.35f};
+    float height{1.80f};
+
+    AABB getAABB(const Vec3& pos) const {
+        return {
+            {pos.x - radius, pos.y, pos.z - radius},
+            {pos.x + radius, pos.y + height, pos.z + radius}
+        };
+    }
+
+    void jump() {
+        if (isGrounded) {
+            velocity.y = 7.5f; // Initial vertical jump impulse
+            isGrounded = false;
+        }
+    }
+
+    void update(float dt, float inputX, float inputY, float yaw, const std::vector<PhysicsBox>& colliders) {
+        // 1. Directional Movement Vector relative to Camera Look (Yaw)
+        float sinY = std::sin(yaw);
+        float cosY = std::cos(yaw);
+        Vec3 forward = {sinY, 0.0f, -cosY};
+        Vec3 right = {cosY, 0.0f, sinY};
+
+        float speed = 6.8f; // Walk/Run speed
+        Vec3 targetMove = (forward * inputY + right * inputX) * speed;
+
+        // Smooth horizontal acceleration
+        velocity.x = targetMove.x;
+        velocity.z = targetMove.z;
+
+        // 2. Realistic Gravity Acceleration
+        const float kGravity = -18.5f;
+        velocity.y += kGravity * dt;
+        if (velocity.y < -30.0f) velocity.y = -30.0f; // Terminal velocity clamp
+
+        // 3. Collision Resolution along X, Z, and Y axes
+        Vec3 stepX = position;
+        stepX.x += velocity.x * dt;
+        AABB boxX = getAABB(stepX);
+        bool colX = false;
+        for (const auto& c : colliders) {
+            if (boxX.intersects(c.box)) { colX = true; break; }
+        }
+        if (!colX) position.x = stepX.x;
+
+        Vec3 stepZ = position;
+        stepZ.z += velocity.z * dt;
+        AABB boxZ = getAABB(stepZ);
+        bool colZ = false;
+        for (const auto& c : colliders) {
+            if (boxZ.intersects(c.box)) { colZ = true; break; }
+        }
+        if (!colZ) position.z = stepZ.z;
+
+        // Vertical collision check
+        Vec3 stepY = position;
+        stepY.y += velocity.y * dt;
+        AABB boxY = getAABB(stepY);
+
+        isGrounded = false;
+        // Global Terrain Base Plane
+        if (stepY.y <= 0.0f) {
+            position.y = 0.0f;
+            velocity.y = 0.0f;
+            isGrounded = true;
+        } else {
+            bool colY = false;
+            for (const auto& c : colliders) {
+                if (boxY.intersects(c.box)) {
+                    if (velocity.y < 0.0f) { // Falling onto surface
+                        position.y = c.box.max.y;
+                        velocity.y = 0.0f;
+                        isGrounded = true;
+                    } else if (velocity.y > 0.0f) { // Hitting ceiling
+                        position.y = c.box.min.y - height;
+                        velocity.y = 0.0f;
+                    }
+                    colY = true;
+                    break;
+                }
+            }
+            if (!colY) position.y = stepY.y;
+        }
+    }
+
+    Vec3 getEyePosition() const {
+        return {position.x, position.y + eyeHeight, position.z};
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Vulkan High-Performance Renderer Engine
+// -----------------------------------------------------------------------------
 class VulkanRenderer {
 public:
     explicit VulkanRenderer(ANativeWindow* w) : window_(w) {
         if (window_) ANativeWindow_acquire(window_);
+        buildWorldChunks();
     }
 
     ~VulkanRenderer() {
@@ -171,7 +293,7 @@ public:
             started_ = std::chrono::steady_clock::now();
             thread_ = std::thread(&VulkanRenderer::renderLoop, this);
         } catch (const std::exception& e) {
-            status_ = std::string("Vulkan initialization failed: ") + e.what();
+            status_ = std::string("Vulkan init failed: ") + e.what();
             LOGE("%s", status_.c_str());
             cleanup();
         }
@@ -187,47 +309,30 @@ public:
 
     std::string status() const { return status_; }
 
-    void orbit(float dx, float dy) {
-        yaw_.store(yaw_.load() + dx * 0.0075f);
-        pitch_.store(std::clamp(pitch_.load() + dy * 0.0075f, -1.45f, 1.45f));
+    void look(float dx, float dy) {
+        yaw_.store(yaw_.load() + dx * 0.0035f);
+        pitch_.store(std::clamp(pitch_.load() + dy * 0.0035f, -1.48f, 1.48f));
     }
 
-    void setAutoRotate(bool value) { autoRotate_.store(value); }
-
-    void zoom(float delta) {
-        float fwdX = std::sin(yaw_.load()) * std::cos(pitch_.load());
-        float fwdY = -std::sin(pitch_.load());
-        float fwdZ = -std::cos(yaw_.load()) * std::cos(pitch_.load());
-        camPosX_.store(camPosX_.load() + fwdX * delta);
-        camPosY_.store(camPosY_.load() + fwdY * delta);
-        camPosZ_.store(camPosZ_.load() + fwdZ * delta);
+    void setJoystickInput(float x, float y) {
+        inputX_.store(x);
+        inputY_.store(y);
     }
 
-    // Actual 3D Camera Movement relative to viewing direction (Godot / Unity style)
-    void moveCamera(float forward, float right) {
-        float y = yaw_.load();
-        float fwdX = std::sin(y);
-        float fwdZ = -std::cos(y);
+    void triggerJump() { jumpRequested_.store(true); }
 
-        float rightX = std::cos(y);
-        float rightZ = std::sin(y);
-
-        float speed = 0.35f;
-        camPosX_.store(camPosX_.load() + (fwdX * forward + rightX * right) * speed);
-        camPosZ_.store(camPosZ_.load() + (fwdZ * forward + rightZ * right) * speed);
-    }
-
-    void elevateCamera(float up) {
-        camPosY_.store(camPosY_.load() + up * 0.35f);
+    void updateSettings(float fog, float timeOfDay, float exp) {
+        fogDensity_.store(fog);
+        timeOfDay_.store(timeOfDay);
+        exposure_.store(exp);
     }
 
     void resetView() {
+        std::lock_guard<std::mutex> lock(physicsMutex_);
+        player_.position = {0.0f, 2.0f, 6.0f};
+        player_.velocity = {0.0f, 0.0f, 0.0f};
         yaw_.store(0.0f);
-        pitch_.store(-0.25f);
-        camPosX_.store(0.0f);
-        camPosY_.store(1.2f);
-        camPosZ_.store(5.5f);
-        autoRotate_.store(true);
+        pitch_.store(-0.1f);
     }
 
     std::string loadGlb(const std::vector<std::uint8_t>& bytes) {
@@ -238,14 +343,12 @@ public:
                 vertexTotal += p.vertices.size();
                 indexTotal += p.indices.size();
             }
-            if (vertexTotal == 0 || indexTotal == 0 || vertexTotal > UINT32_MAX || indexTotal > UINT32_MAX) {
-                throw std::runtime_error("GLB mesh is empty or too large for 32-bit Vulkan indices");
-            }
+            if (vertexTotal == 0 || indexTotal == 0) throw std::runtime_error("Empty GLB mesh");
+
             std::vector<Vertex> vertices; vertices.reserve(vertexTotal);
             std::vector<std::uint32_t> indices; indices.reserve(indexTotal);
-            float lo[3] = {INFINITY, INFINITY, INFINITY};
-            float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
 
+            float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
             for (const auto& p : decoded.primitives) {
                 for (const auto& v : p.vertices) {
                     for (int k = 0; k < 3; ++k) {
@@ -256,12 +359,11 @@ public:
             }
 
             const float cx = (lo[0] + hi[0]) * 0.5f;
-            const float cy = (lo[1] + hi[1]) * 0.5f;
+            const float cy = lo[1]; // Rest on feet
             const float cz = (lo[2] + hi[2]) * 0.5f;
             const float span = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
-            if (!std::isfinite(span) || span < 1e-8f) throw std::runtime_error("GLB mesh has degenerate bounds");
+            const float scaleFactor = 2.5f / std::max(span, 1e-4f);
 
-            const float scale = 2.4f / span;
             std::vector<DrawRange> ranges;
             for (const auto& p : decoded.primitives) {
                 const auto base = static_cast<std::uint32_t>(vertices.size());
@@ -274,38 +376,34 @@ public:
 
                 for (const auto& v : p.vertices) {
                     Vertex out{};
-                    for (int k = 0; k < 3; ++k) {
-                        out.position[k] = (v.position[k] - (k == 0 ? cx : k == 1 ? cy : cz)) * scale;
-                    }
+                    out.position[0] = (v.position[0] - cx) * scaleFactor;
+                    out.position[1] = (v.position[1] - cy) * scaleFactor;
+                    out.position[2] = (v.position[2] - cz) * scaleFactor;
                     std::copy(v.normal, v.normal + 3, out.normal);
                     vertices.push_back(out);
                 }
-                for (auto index : p.indices) indices.push_back(base + index);
+                for (auto idx : p.indices) indices.push_back(base + idx);
                 ranges.push_back(range);
             }
 
             std::lock_guard<std::mutex> lock(gpuMutex_);
-            if (!device_) throw std::runtime_error("Vulkan device is not ready; retry GLB import after viewport starts");
-            check(vkDeviceWaitIdle(device_), "vkDeviceWaitIdle(GLB upload)");
+            if (!device_) throw std::runtime_error("Device not initialized");
+            vkDeviceWaitIdle(device_);
 
-            if (vertexBuffer_) vkDestroyBuffer(device_, vertexBuffer_, nullptr);
-            if (indexBuffer_) vkDestroyBuffer(device_, indexBuffer_, nullptr);
-            if (vertexMemory_) vkFreeMemory(device_, vertexMemory_, nullptr);
-            if (indexMemory_) vkFreeMemory(device_, indexMemory_, nullptr);
-            vertexBuffer_ = indexBuffer_ = VK_NULL_HANDLE;
-            vertexMemory_ = indexMemory_ = VK_NULL_HANDLE;
+            if (glbVertexBuffer_) vkDestroyBuffer(device_, glbVertexBuffer_, nullptr);
+            if (glbIndexBuffer_) vkDestroyBuffer(device_, glbIndexBuffer_, nullptr);
+            if (glbVertexMemory_) vkFreeMemory(device_, glbVertexMemory_, nullptr);
+            if (glbIndexMemory_) vkFreeMemory(device_, glbIndexMemory_, nullptr);
 
-            createBuffer(vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBuffer_, vertexMemory_, vertices.data());
-            createBuffer(indices.size() * sizeof(std::uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBuffer_, indexMemory_, indices.data());
-            indexCount_ = static_cast<std::uint32_t>(indices.size());
-            importedRanges_ = std::move(ranges);
-            importedModel_ = true;
+            createBuffer(vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, glbVertexBuffer_, glbVertexMemory_, vertices.data());
+            createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, glbIndexBuffer_, glbIndexMemory_, indices.data());
+            glbRanges_ = std::move(ranges);
+            hasGlbModel_ = true;
 
-            status_ = "GLB loaded | " + std::to_string(decoded.primitives.size()) + " primitive(s) | " + std::to_string(vertexTotal) + " vertices | " + deviceName_;
-            LOGI("%s", status_.c_str());
+            status_ = "GLB Imported (" + std::to_string(vertexTotal) + " verts)";
             return status_;
         } catch (const std::exception& e) {
-            status_ = std::string("GLB import failed: ") + e.what();
+            status_ = std::string("GLB failed: ") + e.what();
             LOGE("%s", status_.c_str());
             return status_;
         }
@@ -331,20 +429,28 @@ private:
     std::vector<VkFramebuffer> framebuffers_;
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
+
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout skyPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline skyPipeline_ = VK_NULL_HANDLE;
-    VkBuffer vertexBuffer_ = VK_NULL_HANDLE, indexBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory vertexMemory_ = VK_NULL_HANDLE, indexMemory_ = VK_NULL_HANDLE;
-    uint32_t indexCount_ = 0;
+
+    // Static Cube Geometry
+    VkBuffer cubeVertexBuffer_ = VK_NULL_HANDLE, cubeIndexBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory cubeVertexMemory_ = VK_NULL_HANDLE, cubeIndexMemory_ = VK_NULL_HANDLE;
+    uint32_t cubeIndexCount_ = 0;
+
+    // GLB Dynamic Geometry
+    VkBuffer glbVertexBuffer_ = VK_NULL_HANDLE, glbIndexBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory glbVertexMemory_ = VK_NULL_HANDLE, glbIndexMemory_ = VK_NULL_HANDLE;
+    bool hasGlbModel_ = false;
 
     struct DrawRange {
         uint32_t firstIndex = 0, indexCount = 0;
         float baseColor[4]{1, 1, 1, 1};
-        float metallic = 1.0f, roughness = 1.0f;
+        float metallic = 0.5f, roughness = 0.5f;
     };
-    std::vector<DrawRange> importedRanges_;
+    std::vector<DrawRange> glbRanges_;
 
     static constexpr size_t kFrames = 2;
     std::array<VkSemaphore, kFrames> imageAvailable_{};
@@ -352,18 +458,23 @@ private:
     std::array<VkFence, kFrames> fences_{};
     size_t frame_ = 0;
 
-    std::atomic<bool> running_{false}, resizeRequested_{false}, autoRotate_{true};
-    std::mutex gpuMutex_;
-    bool importedModel_ = false;
+    std::atomic<bool> running_{false}, resizeRequested_{false}, jumpRequested_{false};
+    std::mutex gpuMutex_, physicsMutex_, lifecycleMutex_;
 
-    // Actual 3D Camera Variables (Unity/UE4 Transform)
-    std::atomic<float> yaw_{0.0f}, pitch_{-0.25f};
-    std::atomic<float> camPosX_{0.0f}, camPosY_{1.2f}, camPosZ_{5.5f};
+    // FPS Camera & Physics Controllers
+    CharacterController player_;
+    std::vector<PhysicsBox> worldBoxes_;
+    std::atomic<float> yaw_{0.0f}, pitch_{-0.1f};
+    std::atomic<float> inputX_{0.0f}, inputY_{0.0f};
+
+    // Environmental Engine Parameters
+    std::atomic<float> fogDensity_{0.045f};
+    std::atomic<float> timeOfDay_{14.0f};
+    std::atomic<float> exposure_{1.0f};
 
     std::thread thread_;
     std::chrono::steady_clock::time_point started_{};
-    std::string deviceName_ = "unknown GPU", status_ = "Vulkan renderer not initialized";
-    std::mutex lifecycleMutex_;
+    std::string deviceName_ = "GPU", status_ = "Init";
 
     struct MeshPushConstants {
         Mat4 mvp;
@@ -372,6 +483,7 @@ private:
         float material[4];
         float cameraPos[4];
         float sunDir[4];
+        float envParams[4];
     };
 
     struct SkyPushConstants {
@@ -379,12 +491,32 @@ private:
         float sunDir[4];
     };
 
+    void buildWorldChunks() {
+        worldBoxes_.clear();
+        // Ground Foundation Chunk (Floor)
+        worldBoxes_.push_back({{{-60.0f, -1.0f, -60.0f}, {60.0f, 0.0f, 60.0f}}, {0.22f, 0.28f, 0.24f, 1.0f}, 0.05f, 0.90f});
+
+        // Staircases and Obstacle Pillars
+        for (int i = 0; i < 7; ++i) {
+            float h = (i + 1) * 0.45f;
+            float z = -2.0f - (i * 1.2f);
+            worldBoxes_.push_back({{{-1.5f, 0.0f, z - 0.6f}, {1.5f, h, z + 0.6f}}, {0.65f, 0.58f, 0.48f, 1.0f}, 0.15f, 0.75f});
+        }
+
+        // Platform Hub
+        worldBoxes_.push_back({{{-6.0f, 3.15f, -18.0f}, {6.0f, 3.55f, -8.0f}}, {0.35f, 0.45f, 0.60f, 1.0f}, 0.40f, 0.35f});
+
+        // Metallic Pillar Towers
+        worldBoxes_.push_back({{{-7.0f, 0.0f, -6.0f}, {-5.0f, 7.0f, -4.0f}}, {0.95f, 0.85f, 0.30f, 1.0f}, 0.95f, 0.15f});
+        worldBoxes_.push_back({{{5.0f, 0.0f, -6.0f}, {7.0f, 7.0f, -4.0f}}, {0.92f, 0.92f, 0.95f, 1.0f}, 0.98f, 0.08f});
+    }
+
     void initialize() {
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         app.pApplicationName = "Neo-3D";
-        app.applicationVersion = VK_MAKE_VERSION(0, 3, 0);
-        app.pEngineName = "Neo-3D Mobile Vulkan Engine";
-        app.engineVersion = VK_MAKE_VERSION(0, 3, 0);
+        app.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+        app.pEngineName = "Neo-3D Engine";
+        app.engineVersion = VK_MAKE_VERSION(1, 0, 0);
         app.apiVersion = VK_API_VERSION_1_0;
 
         const char* exts[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
@@ -400,7 +532,7 @@ private:
 
         selectDevice();
         createDevice();
-        createGeometry();
+        createCubeGeometry();
         createSwapchain();
         chooseDepthFormat();
         createRenderPass();
@@ -411,14 +543,12 @@ private:
         createSkyPipeline();
         createSync();
 
-        status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | 3D Camera System + UE4 Physical Atmosphere";
-        LOGI("%s", status_.c_str());
+        status_ = "Engine Online | " + deviceName_ + " | PBR & Volumetrics Active";
     }
 
     void selectDevice() {
         uint32_t count = 0;
-        check(vkEnumeratePhysicalDevices(instance_, &count, nullptr), "vkEnumeratePhysicalDevices(count)");
-        if (!count) throw std::runtime_error("No Vulkan GPU available");
+        check(vkEnumeratePhysicalDevices(instance_, &count, nullptr), "vkEnumeratePhysicalDevices count");
         std::vector<VkPhysicalDevice> ds(count);
         check(vkEnumeratePhysicalDevices(instance_, &count, ds.data()), "vkEnumeratePhysicalDevices");
 
@@ -435,45 +565,35 @@ private:
                 vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface_, &supported);
                 if (supported) pf = i;
             }
-            if (gf == UINT32_MAX || pf == UINT32_MAX) continue;
-
-            uint32_t ec = 0;
-            vkEnumerateDeviceExtensionProperties(d, nullptr, &ec, nullptr);
-            std::vector<VkExtensionProperties> es(ec);
-            vkEnumerateDeviceExtensionProperties(d, nullptr, &ec, es.data());
-            if (std::none_of(es.begin(), es.end(), [](const auto& e) { return std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0; })) continue;
-
-            physical_ = d;
-            graphicsFamily_ = gf;
-            presentFamily_ = pf;
-            VkPhysicalDeviceProperties p{};
-            vkGetPhysicalDeviceProperties(d, &p);
-            deviceName_ = p.deviceName;
-            return;
+            if (gf != UINT32_MAX && pf != UINT32_MAX) {
+                physical_ = d; graphicsFamily_ = gf; presentFamily_ = pf;
+                VkPhysicalDeviceProperties p{};
+                vkGetPhysicalDeviceProperties(d, &p);
+                deviceName_ = p.deviceName;
+                return;
+            }
         }
-        throw std::runtime_error("No physical device supports graphics and Android swapchain presentation");
+        throw std::runtime_error("No GPU capable of graphics and presentation");
     }
 
     void createDevice() {
-        float priority = 1.0f;
+        float prio = 1.0f;
         std::vector<VkDeviceQueueCreateInfo> qs;
-        for (uint32_t family : {graphicsFamily_, presentFamily_}) {
-            if (std::any_of(qs.begin(), qs.end(), [family](const auto& q) { return q.queueFamilyIndex == family; })) continue;
+        for (uint32_t f : {graphicsFamily_, presentFamily_}) {
+            if (std::any_of(qs.begin(), qs.end(), [f](const auto& q) { return q.queueFamilyIndex == f; })) continue;
             VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-            q.queueFamilyIndex = family;
+            q.queueFamilyIndex = f;
             q.queueCount = 1;
-            q.pQueuePriorities = &priority;
+            q.pQueuePriorities = &prio;
             qs.push_back(q);
         }
 
-        VkPhysicalDeviceFeatures features{};
+        const char* ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
         VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         ci.queueCreateInfoCount = static_cast<uint32_t>(qs.size());
         ci.pQueueCreateInfos = qs.data();
-        const char* ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
         ci.enabledExtensionCount = 1;
         ci.ppEnabledExtensionNames = &ext;
-        ci.pEnabledFeatures = &features;
         check(vkCreateDevice(physical_, &ci, nullptr, &device_), "vkCreateDevice");
 
         vkGetDeviceQueue(device_, graphicsFamily_, 0, &graphicsQueue_);
@@ -486,10 +606,10 @@ private:
         for (uint32_t i = 0; i < p.memoryTypeCount; ++i) {
             if ((bits & (1u << i)) && (p.memoryTypes[i].propertyFlags & flags) == flags) return i;
         }
-        throw std::runtime_error("No Vulkan memory type matches requested properties");
+        throw std::runtime_error("No matching memory type found");
     }
 
-    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buffer, VkDeviceMemory& memory, const void* data) {
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buffer, VkDeviceMemory& mem, const void* data) {
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bi.size = size;
         bi.usage = usage;
@@ -502,58 +622,51 @@ private:
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        check(vkAllocateMemory(device_, &ai, nullptr, &memory), "vkAllocateMemory(buffer)");
-        check(vkBindBufferMemory(device_, buffer, memory, 0), "vkBindBufferMemory");
+        check(vkAllocateMemory(device_, &ai, nullptr, &mem), "vkAllocateMemory");
+        check(vkBindBufferMemory(device_, buffer, mem, 0), "vkBindBufferMemory");
 
         if (data) {
             void* mapped = nullptr;
-            check(vkMapMemory(device_, memory, 0, size, 0, &mapped), "vkMapMemory");
+            check(vkMapMemory(device_, mem, 0, size, 0, &mapped), "vkMapMemory");
             std::memcpy(mapped, data, static_cast<size_t>(size));
-            vkUnmapMemory(device_, memory);
+            vkUnmapMemory(device_, mem);
         }
     }
 
-    void createGeometry() {
+    void createCubeGeometry() {
         const std::array<Vertex, 24> v = {{
-            {{-1, -1,  1}, { 0,  0,  1}}, {{ 1, -1,  1}, { 0,  0,  1}}, {{ 1,  1,  1}, { 0,  0,  1}}, {{-1,  1,  1}, { 0,  0,  1}},
-            {{ 1, -1, -1}, { 0,  0, -1}}, {{-1, -1, -1}, { 0,  0, -1}}, {{-1,  1, -1}, { 0,  0, -1}}, {{ 1,  1, -1}, { 0,  0, -1}},
-            {{-1, -1, -1}, {-1,  0,  0}}, {{-1, -1,  1}, {-1,  0,  0}}, {{-1,  1,  1}, {-1,  0,  0}}, {{-1,  1, -1}, {-1,  0,  0}},
-            {{ 1, -1,  1}, { 1,  0,  0}}, {{ 1, -1, -1}, { 1,  0,  0}}, {{ 1,  1, -1}, { 1,  0,  0}}, {{ 1,  1,  1}, { 1,  0,  0}},
-            {{-1,  1,  1}, { 0,  1,  0}}, {{ 1,  1,  1}, { 0,  1,  0}}, {{ 1,  1, -1}, { 0,  1,  0}}, {{-1,  1, -1}, { 0,  1,  0}},
-            {{-1, -1, -1}, { 0, -1,  0}}, {{ 1, -1, -1}, { 0, -1,  0}}, {{ 1, -1,  1}, { 0, -1,  0}}, {{-1, -1,  1}, { 0, -1,  0}}
+            {{-0.5f, -0.5f,  0.5f}, { 0,  0,  1}}, {{ 0.5f, -0.5f,  0.5f}, { 0,  0,  1}}, {{ 0.5f,  0.5f,  0.5f}, { 0,  0,  1}}, {{-0.5f,  0.5f,  0.5f}, { 0,  0,  1}},
+            {{ 0.5f, -0.5f, -0.5f}, { 0,  0, -1}}, {{-0.5f, -0.5f, -0.5f}, { 0,  0, -1}}, {{-0.5f,  0.5f, -0.5f}, { 0,  0, -1}}, {{ 0.5f,  0.5f, -0.5f}, { 0,  0, -1}},
+            {{-0.5f, -0.5f, -0.5f}, {-1,  0,  0}}, {{-0.5f, -0.5f,  0.5f}, {-1,  0,  0}}, {{-0.5f,  0.5f,  0.5f}, {-1,  0,  0}}, {{-0.5f,  0.5f, -0.5f}, {-1,  0,  0}},
+            {{ 0.5f, -0.5f,  0.5f}, { 1,  0,  0}}, {{ 0.5f, -0.5f, -0.5f}, { 1,  0,  0}}, {{ 0.5f,  0.5f, -0.5f}, { 1,  0,  0}}, {{ 0.5f,  0.5f,  0.5f}, { 1,  0,  0}},
+            {{-0.5f,  0.5f,  0.5f}, { 0,  1,  0}}, {{ 0.5f,  0.5f,  0.5f}, { 0,  1,  0}}, {{ 0.5f,  0.5f, -0.5f}, { 0,  1,  0}}, {{-0.5f,  0.5f, -0.5f}, { 0,  1,  0}},
+            {{-0.5f, -0.5f, -0.5f}, { 0, -1,  0}}, {{ 0.5f, -0.5f, -0.5f}, { 0, -1,  0}}, {{ 0.5f, -0.5f,  0.5f}, { 0, -1,  0}}, {{-0.5f, -0.5f,  0.5f}, { 0, -1,  0}}
         }};
         const std::array<uint32_t, 36> idx = {{
-             0,  1,  2,  2,  3,  0,
-             4,  5,  6,  6,  7,  4,
-             8,  9, 10, 10, 11,  8,
-            12, 13, 14, 14, 15, 12,
-            16, 17, 18, 18, 19, 16,
-            20, 21, 22, 22, 23, 20
+             0,  1,  2,  2,  3,  0,   4,  5,  6,  6,  7,  4,
+             8,  9, 10, 10, 11,  8,  12, 13, 14, 14, 15, 12,
+            16, 17, 18, 18, 19, 16,  20, 21, 22, 22, 23, 20
         }};
-        indexCount_ = static_cast<uint32_t>(idx.size());
-        createBuffer(sizeof(v), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBuffer_, vertexMemory_, v.data());
-        createBuffer(sizeof(idx), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBuffer_, indexMemory_, idx.data());
+        cubeIndexCount_ = static_cast<uint32_t>(idx.size());
+        createBuffer(sizeof(v), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, cubeVertexBuffer_, cubeVertexMemory_, v.data());
+        createBuffer(sizeof(idx), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, cubeIndexBuffer_, cubeIndexMemory_, idx.data());
     }
 
     void createSwapchain() {
         VkSurfaceCapabilitiesKHR caps{};
-        check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_, surface_, &caps), "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+        check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_, surface_, &caps), "vkGetCaps");
 
         uint32_t n = 0;
         vkGetPhysicalDeviceSurfaceFormatsKHR(physical_, surface_, &n, nullptr);
-        if (!n) throw std::runtime_error("No swapchain surface formats");
         std::vector<VkSurfaceFormatKHR> fs(n);
         vkGetPhysicalDeviceSurfaceFormatsKHR(physical_, surface_, &n, fs.data());
 
-        VkSurfaceFormatKHR chosen = fs.front();
+        format_ = fs[0].format;
         for (const auto& f : fs) {
-            if ((f.format == VK_FORMAT_R8G8B8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_UNORM) &&
-                f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-                chosen = f;
-                break;
+            if (f.format == VK_FORMAT_R8G8B8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_UNORM) {
+                format_ = f.format; break;
             }
         }
-        format_ = chosen.format;
 
         if (caps.currentExtent.width != UINT32_MAX) {
             extent_ = caps.currentExtent;
@@ -565,33 +678,17 @@ private:
         uint32_t ic = caps.minImageCount + 1;
         if (caps.maxImageCount && ic > caps.maxImageCount) ic = caps.maxImageCount;
 
-        VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-        if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
-            compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-        } else if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
-            compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        }
-
         VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
         ci.surface = surface_;
         ci.minImageCount = ic;
-        ci.imageFormat = chosen.format;
-        ci.imageColorSpace = chosen.colorSpace;
+        ci.imageFormat = format_;
+        ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         ci.imageExtent = extent_;
         ci.imageArrayLayers = 1;
         ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
-        uint32_t families[] = {graphicsFamily_, presentFamily_};
-        if (graphicsFamily_ != presentFamily_) {
-            ci.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-            ci.queueFamilyIndexCount = 2;
-            ci.pQueueFamilyIndices = families;
-        } else {
-            ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        }
-
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = caps.currentTransform;
-        ci.compositeAlpha = compositeAlpha;
+        ci.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
         ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         ci.clipped = VK_TRUE;
 
@@ -600,7 +697,7 @@ private:
         uint32_t actual = 0;
         vkGetSwapchainImagesKHR(device_, swapchain_, &actual, nullptr);
         images_.resize(actual);
-        check(vkGetSwapchainImagesKHR(device_, swapchain_, &actual, images_.data()), "vkGetSwapchainImagesKHR");
+        vkGetSwapchainImagesKHR(device_, swapchain_, &actual, images_.data());
 
         views_.resize(images_.size());
         for (size_t i = 0; i < images_.size(); ++i) {
@@ -608,9 +705,8 @@ private:
             vi.image = images_[i];
             vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
             vi.format = format_;
-            vi.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
             vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            check(vkCreateImageView(device_, &vi, nullptr, &views_[i]), "vkCreateImageView(swapchain)");
+            check(vkCreateImageView(device_, &vi, nullptr, &views_[i]), "vkCreateImageView");
         }
     }
 
@@ -619,11 +715,10 @@ private:
             VkFormatProperties p{};
             vkGetPhysicalDeviceFormatProperties(physical_, f, &p);
             if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-                depthFormat_ = f;
-                return;
+                depthFormat_ = f; return;
             }
         }
-        throw std::runtime_error("GPU has no supported depth attachment format");
+        throw std::runtime_error("No suitable depth format");
     }
 
     void createRenderPass() {
@@ -632,8 +727,6 @@ private:
         a[0].samples = VK_SAMPLE_COUNT_1_BIT;
         a[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        a[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        a[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         a[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
@@ -641,42 +734,32 @@ private:
         a[1].samples = VK_SAMPLE_COUNT_1_BIT;
         a[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         a[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        a[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        a[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         a[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-        VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkAttachmentReference depth{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference cRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference dRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
         VkSubpassDescription sub{};
         sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         sub.colorAttachmentCount = 1;
-        sub.pColorAttachments = &color;
-        sub.pDepthStencilAttachment = &depth;
+        sub.pColorAttachments = &cRef;
+        sub.pDepthStencilAttachment = &dRef;
 
-        std::array<VkSubpassDependency, 2> deps{};
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-        deps[0].dstSubpass = 0;
-        deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        deps[0].srcAccessMask = 0;
-        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-        deps[1].srcSubpass = 0;
-        deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-        deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        deps[1].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        deps[1].dstAccessMask = 0;
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
         VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-        ci.attachmentCount = static_cast<uint32_t>(a.size());
+        ci.attachmentCount = 2;
         ci.pAttachments = a.data();
         ci.subpassCount = 1;
         ci.pSubpasses = &sub;
-        ci.dependencyCount = static_cast<uint32_t>(deps.size());
-        ci.pDependencies = deps.data();
+        ci.dependencyCount = 1;
+        ci.pDependencies = &dep;
 
         check(vkCreateRenderPass(device_, &ci, nullptr, &renderPass_), "vkCreateRenderPass");
     }
@@ -690,15 +773,12 @@ private:
             VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             ii.imageType = VK_IMAGE_TYPE_2D;
             ii.extent = {extent_.width, extent_.height, 1};
-            ii.mipLevels = 1;
-            ii.arrayLayers = 1;
+            ii.mipLevels = 1; ii.arrayLayers = 1;
             ii.format = depthFormat_;
             ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-            ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
             ii.samples = VK_SAMPLE_COUNT_1_BIT;
-            ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            check(vkCreateImage(device_, &ii, nullptr, &depthImages_[i]), "vkCreateImage(depth)");
+            check(vkCreateImage(device_, &ii, nullptr, &depthImages_[i]), "vkCreateImage depth");
 
             VkMemoryRequirements req{};
             vkGetImageMemoryRequirements(device_, depthImages_[i], &req);
@@ -706,119 +786,16 @@ private:
             VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             ai.allocationSize = req.size;
             ai.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            check(vkAllocateMemory(device_, &ai, nullptr, &depthMemory_[i]), "vkAllocateMemory(depth)");
-            check(vkBindImageMemory(device_, depthImages_[i], depthMemory_[i], 0), "vkBindImageMemory(depth)");
+            check(vkAllocateMemory(device_, &ai, nullptr, &depthMemory_[i]), "vkAllocateMemory depth");
+            check(vkBindImageMemory(device_, depthImages_[i], depthMemory_[i], 0), "vkBindImageMemory depth");
 
             VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
             vi.image = depthImages_[i];
             vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
             vi.format = depthFormat_;
             vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-            check(vkCreateImageView(device_, &vi, nullptr, &depthViews_[i]), "vkCreateImageView(depth)");
+            check(vkCreateImageView(device_, &vi, nullptr, &depthViews_[i]), "vkCreateImageView depth");
         }
-    }
-
-    VkShaderModule shader(const uint32_t* code, size_t bytes) {
-        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        ci.codeSize = bytes;
-        ci.pCode = code;
-        VkShaderModule m = VK_NULL_HANDLE;
-        check(vkCreateShaderModule(device_, &ci, nullptr, &m), "vkCreateShaderModule");
-        return m;
-    }
-
-    void createGraphicsPipeline() {
-        VkShaderModule vert = shader(kMeshVert, kMeshVertSize);
-        VkShaderModule frag = shader(kMeshFrag, kMeshFragSize);
-        try {
-            VkPushConstantRange range{};
-            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-            range.offset = 0;
-            range.size = sizeof(MeshPushConstants);
-
-            VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-            li.pushConstantRangeCount = 1;
-            li.pPushConstantRanges = &range;
-            check(vkCreatePipelineLayout(device_, &li, nullptr, &pipelineLayout_), "vkCreatePipelineLayout");
-
-            std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
-            stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-            stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-            stages[0].module = vert;
-            stages[0].pName = "main";
-            stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-            stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-            stages[1].module = frag;
-            stages[1].pName = "main";
-
-            VkVertexInputBindingDescription binding{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
-            std::array<VkVertexInputAttributeDescription, 2> attrs = {
-                VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
-                VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)}
-            };
-
-            VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-            vi.vertexBindingDescriptionCount = 1;
-            vi.pVertexBindingDescriptions = &binding;
-            vi.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrs.size());
-            vi.pVertexAttributeDescriptions = attrs.data();
-
-            VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-            VkViewport vp{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 1.0f};
-            VkRect2D sc{{0, 0}, extent_};
-            VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-            vsi.viewportCount = 1;
-            vsi.pViewports = &vp;
-            vsi.scissorCount = 1;
-            vsi.pScissors = &sc;
-
-            VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-            rs.polygonMode = VK_POLYGON_MODE_FILL;
-            rs.cullMode = VK_CULL_MODE_NONE;
-            rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
-            rs.lineWidth = 1.0f;
-
-            VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-            VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-            ds.depthTestEnable = VK_TRUE;
-            ds.depthWriteEnable = VK_TRUE;
-            ds.depthCompareOp = VK_COMPARE_OP_LESS;
-            ds.minDepthBounds = 0.0f;
-            ds.maxDepthBounds = 1.0f;
-
-            VkPipelineColorBlendAttachmentState ba{};
-            ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-            VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-            bs.attachmentCount = 1;
-            bs.pAttachments = &ba;
-
-            VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-            pi.stageCount = 2;
-            pi.pStages = stages.data();
-            pi.pVertexInputState = &vi;
-            pi.pInputAssemblyState = &ia;
-            pi.pViewportState = &vsi;
-            pi.pRasterizationState = &rs;
-            pi.pMultisampleState = &ms;
-            pi.pDepthStencilState = &ds;
-            pi.pColorBlendState = &bs;
-            pi.layout = pipelineLayout_;
-            pi.renderPass = renderPass_;
-            pi.subpass = 0;
-
-            check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &pipeline_), "vkCreateGraphicsPipelines");
-        } catch (...) {
-            vkDestroyShaderModule(device_, vert, nullptr);
-            vkDestroyShaderModule(device_, frag, nullptr);
-            throw;
-        }
-        vkDestroyShaderModule(device_, vert, nullptr);
-        vkDestroyShaderModule(device_, frag, nullptr);
     }
 
     void createFramebuffers() {
@@ -850,82 +827,156 @@ private:
         check(vkAllocateCommandBuffers(device_, &ai, commandBuffers_.data()), "vkAllocateCommandBuffers");
     }
 
+    VkShaderModule createShader(const uint32_t* code, size_t sz) {
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = sz;
+        ci.pCode = code;
+        VkShaderModule m = VK_NULL_HANDLE;
+        check(vkCreateShaderModule(device_, &ci, nullptr, &m), "vkCreateShaderModule");
+        return m;
+    }
+
+    void createGraphicsPipeline() {
+        VkShaderModule v = createShader(kMeshVert, kMeshVertSize);
+        VkShaderModule f = createShader(kMeshFrag, kMeshFragSize);
+
+        VkPushConstantRange range{};
+        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        range.size = sizeof(MeshPushConstants);
+
+        VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        li.pushConstantRangeCount = 1;
+        li.pPushConstantRanges = &range;
+        check(vkCreatePipelineLayout(device_, &li, nullptr, &pipelineLayout_), "vkCreatePipelineLayout");
+
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = v;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = f;
+        stages[1].pName = "main";
+
+        VkVertexInputBindingDescription b{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        VkVertexInputAttributeDescription a[2] = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
+            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)}
+        };
+
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &b;
+        vi.vertexAttributeDescriptionCount = 2;
+        vi.pVertexAttributeDescriptions = a;
+
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkViewport vp{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 1.0f};
+        VkRect2D sc{{0, 0}, extent_};
+        VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vsi.viewportCount = 1; vsi.pViewports = &vp;
+        vsi.scissorCount = 1;  vsi.pScissors = &sc;
+
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        ds.depthTestEnable = VK_TRUE;
+        ds.depthWriteEnable = VK_TRUE;
+        ds.depthCompareOp = VK_COMPARE_OP_LESS;
+
+        VkPipelineColorBlendAttachmentState ba{};
+        ba.colorWriteMask = 0xf;
+        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        bs.attachmentCount = 1; bs.pAttachments = &ba;
+
+        VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        pi.stageCount = 2; pi.pStages = stages;
+        pi.pVertexInputState = &vi;
+        pi.pInputAssemblyState = &ia;
+        pi.pViewportState = &vsi;
+        pi.pRasterizationState = &rs;
+        pi.pMultisampleState = &ms;
+        pi.pDepthStencilState = &ds;
+        pi.pColorBlendState = &bs;
+        pi.layout = pipelineLayout_;
+        pi.renderPass = renderPass_;
+
+        check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &pipeline_), "vkCreateGraphicsPipelines");
+        vkDestroyShaderModule(device_, v, nullptr);
+        vkDestroyShaderModule(device_, f, nullptr);
+    }
+
     void createSkyPipeline() {
-        VkShaderModule vert = shader(kSkyVert, kSkyVertSize);
-        VkShaderModule frag = shader(kSkyFrag, kSkyFragSize);
-        try {
-            VkPushConstantRange range{};
-            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-            range.offset = 0;
-            range.size = sizeof(SkyPushConstants);
+        VkShaderModule v = createShader(kSkyVert, kSkyVertSize);
+        VkShaderModule f = createShader(kSkyFrag, kSkyFragSize);
 
-            VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-            li.pushConstantRangeCount = 1;
-            li.pPushConstantRanges = &range;
-            check(vkCreatePipelineLayout(device_, &li, nullptr, &skyPipelineLayout_), "vkCreatePipelineLayout(sky)");
+        VkPushConstantRange range{};
+        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        range.size = sizeof(SkyPushConstants);
 
-            std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
-            stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-            stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-            stages[0].module = vert;
-            stages[0].pName = "main";
-            stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-            stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-            stages[1].module = frag;
-            stages[1].pName = "main";
+        VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        li.pushConstantRangeCount = 1;
+        li.pPushConstantRanges = &range;
+        check(vkCreatePipelineLayout(device_, &li, nullptr, &skyPipelineLayout_), "vkCreatePipelineLayout sky");
 
-            VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-            VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = v; stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = f; stages[1].pName = "main";
 
-            VkViewport vp{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 1.0f};
-            VkRect2D sc{{0, 0}, extent_};
-            VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-            vsi.viewportCount = 1;
-            vsi.pViewports = &vp;
-            vsi.scissorCount = 1;
-            vsi.pScissors = &sc;
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-            VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-            rs.polygonMode = VK_POLYGON_MODE_FILL;
-            rs.cullMode = VK_CULL_MODE_NONE;
-            rs.lineWidth = 1.0f;
+        VkViewport vp{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 1.0f};
+        VkRect2D sc{{0, 0}, extent_};
+        VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vsi.viewportCount = 1; vsi.pViewports = &vp;
+        vsi.scissorCount = 1;  vsi.pScissors = &sc;
 
-            VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
 
-            VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-            ds.depthTestEnable = VK_FALSE;
-            ds.depthWriteEnable = VK_FALSE;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-            VkPipelineColorBlendAttachmentState ba{};
-            ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        ds.depthTestEnable = VK_FALSE;
+        ds.depthWriteEnable = VK_FALSE;
 
-            VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-            bs.attachmentCount = 1;
-            bs.pAttachments = &ba;
+        VkPipelineColorBlendAttachmentState ba{};
+        ba.colorWriteMask = 0xf;
+        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        bs.attachmentCount = 1; bs.pAttachments = &ba;
 
-            VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-            pi.stageCount = 2;
-            pi.pStages = stages.data();
-            pi.pVertexInputState = &vi;
-            pi.pInputAssemblyState = &ia;
-            pi.pViewportState = &vsi;
-            pi.pRasterizationState = &rs;
-            pi.pMultisampleState = &ms;
-            pi.pDepthStencilState = &ds;
-            pi.pColorBlendState = &bs;
-            pi.layout = skyPipelineLayout_;
-            pi.renderPass = renderPass_;
+        VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        pi.stageCount = 2; pi.pStages = stages;
+        pi.pVertexInputState = &vi;
+        pi.pInputAssemblyState = &ia;
+        pi.pViewportState = &vsi;
+        pi.pRasterizationState = &rs;
+        pi.pMultisampleState = &ms;
+        pi.pDepthStencilState = &ds;
+        pi.pColorBlendState = &bs;
+        pi.layout = skyPipelineLayout_;
+        pi.renderPass = renderPass_;
 
-            check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &skyPipeline_), "vkCreateGraphicsPipelines(sky)");
-        } catch (...) {
-            if (vert) vkDestroyShaderModule(device_, vert, nullptr);
-            if (frag) vkDestroyShaderModule(device_, frag, nullptr);
-            throw;
-        }
-        vkDestroyShaderModule(device_, vert, nullptr);
-        vkDestroyShaderModule(device_, frag, nullptr);
+        check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &skyPipeline_), "vkCreateGraphicsPipelines sky");
+        vkDestroyShaderModule(device_, v, nullptr);
+        vkDestroyShaderModule(device_, f, nullptr);
     }
 
     void createSync() {
@@ -933,18 +984,18 @@ private:
         VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         for (size_t i = 0; i < kFrames; ++i) {
-            check(vkCreateSemaphore(device_, &si, nullptr, &imageAvailable_[i]), "vkCreateSemaphore");
-            check(vkCreateSemaphore(device_, &si, nullptr, &renderFinished_[i]), "vkCreateSemaphore");
-            check(vkCreateFence(device_, &fi, nullptr, &fences_[i]), "vkCreateFence");
+            check(vkCreateSemaphore(device_, &si, nullptr, &imageAvailable_[i]), "semA");
+            check(vkCreateSemaphore(device_, &si, nullptr, &renderFinished_[i]), "semR");
+            check(vkCreateFence(device_, &fi, nullptr, &fences_[i]), "fence");
         }
     }
 
-    void record(uint32_t i) {
+    void record(uint32_t i, float dt) {
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         check(vkBeginCommandBuffer(commandBuffers_[i], &bi), "vkBeginCommandBuffer");
 
         VkClearValue clears[2]{};
-        clears[0].color = {{0.12f, 0.22f, 0.38f, 1.0f}};
+        clears[0].color = {{0.05f, 0.08f, 0.14f, 1.0f}};
         clears[1].depthStencil = {1.0f, 0};
 
         VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -958,91 +1009,95 @@ private:
 
         float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
 
-        // 1. TRUE 3D CAMERA TRANSFORM (Unity / UE4 / Godot Standard)
-        // Camera position is absolute; Auto-rotate NEVER touches the Camera!
-        float eyeX = camPosX_.load();
-        float eyeY = camPosY_.load();
-        float eyeZ = camPosZ_.load();
+        // 1. Physics Engine Step
+        {
+            std::lock_guard<std::mutex> lock(physicsMutex_);
+            if (jumpRequested_.exchange(false)) {
+                player_.jump();
+            }
+            player_.update(dt, inputX_.load(), inputY_.load(), yaw_.load(), worldBoxes_);
+        }
 
+        // 2. Camera Orientation Calculation
+        Vec3 eye = player_.getEyePosition();
         float yaw = yaw_.load();
         float pitch = pitch_.load();
+        Vec3 forward = {
+            std::sin(yaw) * std::cos(pitch),
+            -std::sin(pitch),
+            -std::cos(yaw) * std::cos(pitch)
+        };
+        Vec3 target = eye + forward;
 
-        // Target look direction vector
-        float targetX = eyeX + std::sin(yaw) * std::cos(pitch);
-        float targetY = eyeY - std::sin(pitch);
-        float targetZ = eyeZ - std::cos(yaw) * std::cos(pitch);
+        Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
+        Mat4 proj = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
+        Mat4 viewProj = multiply(proj, view);
 
-        Mat4 view = lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
-        Mat4 projection = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
-        Mat4 viewProj = multiply(projection, view);
+        // Calculate Sun Direction from Time of Day
+        float sunAngle = (timeOfDay_.load() / 24.0f) * 6.2831853f - 1.5707963f;
+        float sunDir[4] = {std::cos(sunAngle), std::sin(sunAngle), 0.35f, exposure_.load()};
 
-        // Sun Direction & Animation Time
-        float sunDir[4] = {-0.55f, 0.85f, 0.45f, t};
-
-        // 2. TRUE 3D SPHERICAL SKY (Rotates in 3D as camera rotates)
+        // 3. Render Sky Dome with Volumetric Moving Clouds
         if (skyPipeline_ != VK_NULL_HANDLE) {
             SkyPushConstants skyPush{};
             skyPush.invViewProj = inverseMat4(viewProj);
-            std::copy(sunDir, sunDir + 4, skyPush.sunDir);
+            skyPush.sunDir[0] = sunDir[0];
+            skyPush.sunDir[1] = sunDir[1];
+            skyPush.sunDir[2] = sunDir[2];
+            skyPush.sunDir[3] = t;
 
             vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
             vkCmdPushConstants(commandBuffers_[i], skyPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyPushConstants), &skyPush);
             vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
         }
 
-        // 3. 3D MODELS (AUTO-ROTATE ONLY ROTATES THE MODEL, NOT THE CAMERA!)
+        // 4. Render 3D World Meshes & Boxes (Cook-Torrance PBR)
         vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &vertexBuffer_, &offset);
-        vkCmdBindIndexBuffer(commandBuffers_[i], indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &cubeVertexBuffer_, &offset);
+        vkCmdBindIndexBuffer(commandBuffers_[i], cubeIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
         MeshPushConstants push{};
-        push.cameraPos[0] = eyeX;
-        push.cameraPos[1] = eyeY;
-        push.cameraPos[2] = eyeZ;
-        push.cameraPos[3] = t;
+        push.cameraPos[0] = eye.x; push.cameraPos[1] = eye.y; push.cameraPos[2] = eye.z; push.cameraPos[3] = t;
         std::copy(sunDir, sunDir + 4, push.sunDir);
+        push.envParams[0] = fogDensity_.load();
+        push.envParams[1] = timeOfDay_.load();
 
-        // Model Auto-Rotation Angle
-        float modelRotAngle = autoRotate_.load() ? t * 0.75f : 0.0f;
+        // Draw Static Terrain / Box Chunks
+        for (const auto& b : worldBoxes_) {
+            Vec3 size = b.box.max - b.box.min;
+            Vec3 center = (b.box.min + b.box.max) * 0.5f;
 
-        if (importedModel_) {
-            Mat4 model = rotateY(modelRotAngle);
+            Mat4 model = multiply(translate(center.x, center.y, center.z), scale(size.x, size.y, size.z));
+            push.model = model;
+            push.mvp = multiply(viewProj, model);
+            std::copy(b.color, b.color + 4, push.baseColor);
+            push.material[0] = b.metallic;
+            push.material[1] = b.roughness;
+            push.material[2] = 1.0f; // AO
+
+            vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
+            vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
+        }
+
+        // 5. Draw Imported GLB Mesh if present
+        if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
+            vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
+            vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+
+            Mat4 model = translate(0.0f, 0.0f, -6.0f);
             push.model = model;
             push.mvp = multiply(viewProj, model);
 
-            for (const auto& range : importedRanges_) {
-                std::copy(range.baseColor, range.baseColor + 4, push.baseColor);
-                push.material[0] = range.metallic;
-                push.material[1] = range.roughness;
+            for (const auto& r : glbRanges_) {
+                std::copy(r.baseColor, r.baseColor + 4, push.baseColor);
+                push.material[0] = r.metallic;
+                push.material[1] = r.roughness;
                 push.material[2] = 1.0f;
-                push.material[3] = 0.0f;
 
                 vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
-                vkCmdDrawIndexed(commandBuffers_[i], range.indexCount, 1, range.firstIndex, 0, 0);
-            }
-        } else {
-            const float positions[3] = {-1.65f, 0.0f, 1.65f};
-            for (int object = 0; object < 3; ++object) {
-                // Objects rotate independently; camera stays completely static!
-                Mat4 local = rotateY(modelRotAngle + (object - 1) * 0.45f);
-                Mat4 model = multiply(translate(positions[object], object == 1 ? 0.0f : -0.1f, 0.0f), local);
-                push.model = model;
-                push.mvp = multiply(viewProj, model);
-
-                if (object == 0) {
-                    push.baseColor[0] = 1.00f; push.baseColor[1] = 0.78f; push.baseColor[2] = 0.32f; push.baseColor[3] = 1.0f; // Gold
-                    push.material[0] = 0.95f; push.material[1] = 0.12f; push.material[2] = 1.0f; push.material[3] = 0.0f;
-                } else if (object == 1) {
-                    push.baseColor[0] = 0.95f; push.baseColor[1] = 0.95f; push.baseColor[2] = 0.98f; push.baseColor[3] = 1.0f; // Chrome/Silver
-                    push.material[0] = 0.98f; push.material[1] = 0.05f; push.material[2] = 1.0f; push.material[3] = 0.0f;
-                } else {
-                    push.baseColor[0] = 0.18f; push.baseColor[1] = 0.52f; push.baseColor[2] = 0.88f; push.baseColor[3] = 1.0f; // Matte Blue
-                    push.material[0] = 0.05f; push.material[1] = 0.45f; push.material[2] = 1.0f; push.material[3] = 0.0f;
-                }
-
-                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
-                vkCmdDrawIndexed(commandBuffers_[i], indexCount_, 1, 0, 0, 0);
+                vkCmdDrawIndexed(commandBuffers_[i], r.indexCount, 1, r.firstIndex, 0, 0);
             }
         }
 
@@ -1051,105 +1106,69 @@ private:
     }
 
     void renderLoop() {
-        try {
-            LOGI("Vulkan render loop started");
-            while (running_.load()) {
-                if (resizeRequested_.exchange(false)) {
-                    std::lock_guard<std::mutex> lock(lifecycleMutex_);
-                    rebuild();
-                }
-
-                if (!swapchain_ || !device_ || !pipeline_) {
-                    status_ = "Vulkan renderer stopped: swapchain, device, or graphics pipeline is unavailable";
-                    LOGE("%s", status_.c_str());
-                    break;
-                }
-
-                std::lock_guard<std::mutex> gpuLock(gpuMutex_);
-                check(vkWaitForFences(device_, 1, &fences_[frame_], VK_TRUE, UINT64_MAX), "vkWaitForFences");
-
-                uint32_t imageIndex = 0;
-                VkResult ac = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, imageAvailable_[frame_], VK_NULL_HANDLE, &imageIndex);
-
-                if (ac == VK_ERROR_OUT_OF_DATE_KHR) {
-                    resizeRequested_.store(true);
-                    continue;
-                }
-                if (ac != VK_SUCCESS && ac != VK_SUBOPTIMAL_KHR) {
-                    status_ = "Vulkan frame error: vkAcquireNextImageKHR result=" + std::to_string(static_cast<int>(ac));
-                    LOGE("%s", status_.c_str());
-                    break;
-                }
-
-                vkResetFences(device_, 1, &fences_[frame_]);
-                vkResetCommandBuffer(commandBuffers_[imageIndex], 0);
-                record(imageIndex);
-
-                VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-                VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                si.waitSemaphoreCount = 1;
-                si.pWaitSemaphores = &imageAvailable_[frame_];
-                si.pWaitDstStageMask = &wait;
-                si.commandBufferCount = 1;
-                si.pCommandBuffers = &commandBuffers_[imageIndex];
-                si.signalSemaphoreCount = 1;
-                si.pSignalSemaphores = &renderFinished_[frame_];
-
-                VkResult sub = vkQueueSubmit(graphicsQueue_, 1, &si, fences_[frame_]);
-                if (sub != VK_SUCCESS) {
-                    status_ = "Vulkan frame error: vkQueueSubmit result=" + std::to_string(static_cast<int>(sub));
-                    LOGE("%s", status_.c_str());
-                    break;
-                }
-
-                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-                pi.waitSemaphoreCount = 1;
-                pi.pWaitSemaphores = &renderFinished_[frame_];
-                pi.swapchainCount = 1;
-                pi.pSwapchains = &swapchain_;
-                pi.pImageIndices = &imageIndex;
-
-                VkResult pr = vkQueuePresentKHR(presentQueue_, &pi);
-                if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR || ac == VK_SUBOPTIMAL_KHR) {
-                    resizeRequested_.store(true);
-                } else if (pr != VK_SUCCESS) {
-                    status_ = "Vulkan presentation failed: VkResult=" + std::to_string(static_cast<int>(pr));
-                    LOGE("%s", status_.c_str());
-                    break;
-                }
-
-                frame_ = (frame_ + 1) % kFrames;
+        auto lastTime = std::chrono::steady_clock::now();
+        while (running_.load()) {
+            if (resizeRequested_.exchange(false)) {
+                std::lock_guard<std::mutex> lock(lifecycleMutex_);
+                rebuild();
             }
-        } catch (const std::exception& e) {
-            status_ = std::string("Vulkan render-loop failure: ") + e.what();
-            LOGE("%s", status_.c_str());
-            running_.store(false);
-        } catch (...) {
-            status_ = "Vulkan render-loop failure: unknown native exception";
-            LOGE("%s", status_.c_str());
-            running_.store(false);
+
+            auto now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(now - lastTime).count();
+            lastTime = now;
+            dt = std::clamp(dt, 0.001f, 0.05f); // Frame Delta Clamping
+
+            std::lock_guard<std::mutex> gpuLock(gpuMutex_);
+            check(vkWaitForFences(device_, 1, &fences_[frame_], VK_TRUE, UINT64_MAX), "fence wait");
+
+            uint32_t imageIndex = 0;
+            VkResult ac = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, imageAvailable_[frame_], VK_NULL_HANDLE, &imageIndex);
+            if (ac == VK_ERROR_OUT_OF_DATE_KHR) { resizeRequested_.store(true); continue; }
+
+            vkResetFences(device_, 1, &fences_[frame_]);
+            vkResetCommandBuffer(commandBuffers_[imageIndex], 0);
+            record(imageIndex, dt);
+
+            VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.waitSemaphoreCount = 1;
+            si.pWaitSemaphores = &imageAvailable_[frame_];
+            si.pWaitDstStageMask = &wait;
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &commandBuffers_[imageIndex];
+            si.signalSemaphoreCount = 1;
+            si.pSignalSemaphores = &renderFinished_[frame_];
+
+            check(vkQueueSubmit(graphicsQueue_, 1, &si, fences_[frame_]), "queue submit");
+
+            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            pi.waitSemaphoreCount = 1;
+            pi.pWaitSemaphores = &renderFinished_[frame_];
+            pi.swapchainCount = 1;
+            pi.pSwapchains = &swapchain_;
+            pi.pImageIndices = &imageIndex;
+
+            VkResult pr = vkQueuePresentKHR(presentQueue_, &pi);
+            if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+                resizeRequested_.store(true);
+            }
+
+            frame_ = (frame_ + 1) % kFrames;
         }
     }
 
     void rebuild() {
         if (!device_) return;
-        std::lock_guard<std::mutex> gpuLock(gpuMutex_);
         vkDeviceWaitIdle(device_);
         destroySwapchain();
-        try {
-            createSwapchain();
-            chooseDepthFormat();
-            createRenderPass();
-            createDepthResources();
-            createFramebuffers();
-            createCommands();
-            createGraphicsPipeline();
-            createSkyPipeline();
-            status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | 3D Camera System + UE4 Physical Atmosphere";
-        } catch (const std::exception& e) {
-            status_ = std::string("Swapchain rebuild failed: ") + e.what();
-            LOGE("%s", status_.c_str());
-        }
+        createSwapchain();
+        chooseDepthFormat();
+        createRenderPass();
+        createDepthResources();
+        createFramebuffers();
+        createCommands();
+        createGraphicsPipeline();
+        createSkyPipeline();
     }
 
     void destroySwapchain() {
@@ -1161,19 +1180,15 @@ private:
 
         for (auto f : framebuffers_) if (f) vkDestroyFramebuffer(device_, f, nullptr);
         framebuffers_.clear();
-
         if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr); commandPool_ = VK_NULL_HANDLE;
         commandBuffers_.clear();
-
         if (renderPass_) vkDestroyRenderPass(device_, renderPass_, nullptr); renderPass_ = VK_NULL_HANDLE;
 
         for (auto v : depthViews_) if (v) vkDestroyImageView(device_, v, nullptr); depthViews_.clear();
         for (auto im : depthImages_) if (im) vkDestroyImage(device_, im, nullptr); depthImages_.clear();
         for (auto m : depthMemory_) if (m) vkFreeMemory(device_, m, nullptr); depthMemory_.clear();
-
         for (auto v : views_) if (v) vkDestroyImageView(device_, v, nullptr); views_.clear();
         images_.clear();
-
         if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr); swapchain_ = VK_NULL_HANDLE;
     }
 
@@ -1181,10 +1196,15 @@ private:
         if (device_) vkDeviceWaitIdle(device_);
         destroySwapchain();
         if (device_) {
-            if (vertexBuffer_) vkDestroyBuffer(device_, vertexBuffer_, nullptr);
-            if (indexBuffer_) vkDestroyBuffer(device_, indexBuffer_, nullptr);
-            if (vertexMemory_) vkFreeMemory(device_, vertexMemory_, nullptr);
-            if (indexMemory_) vkFreeMemory(device_, indexMemory_, nullptr);
+            if (cubeVertexBuffer_) vkDestroyBuffer(device_, cubeVertexBuffer_, nullptr);
+            if (cubeIndexBuffer_) vkDestroyBuffer(device_, cubeIndexBuffer_, nullptr);
+            if (cubeVertexMemory_) vkFreeMemory(device_, cubeVertexMemory_, nullptr);
+            if (cubeIndexMemory_) vkFreeMemory(device_, cubeIndexMemory_, nullptr);
+
+            if (glbVertexBuffer_) vkDestroyBuffer(device_, glbVertexBuffer_, nullptr);
+            if (glbIndexBuffer_) vkDestroyBuffer(device_, glbIndexBuffer_, nullptr);
+            if (glbVertexMemory_) vkFreeMemory(device_, glbVertexMemory_, nullptr);
+            if (glbIndexMemory_) vkFreeMemory(device_, glbIndexMemory_, nullptr);
 
             for (size_t i = 0; i < kFrames; ++i) {
                 if (imageAvailable_[i]) vkDestroySemaphore(device_, imageAvailable_[i], nullptr);
@@ -1210,6 +1230,9 @@ static VulkanRenderer* gRenderer = nullptr;
 
 } // namespace neo3d
 
+// -----------------------------------------------------------------------------
+// JNI Method Bindings (Synchronized with MainActivity.kt)
+// -----------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStart(JNIEnv* env, jobject, jobject surface) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
     if (neo3d::gRenderer) {
@@ -1218,10 +1241,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStart
         neo3d::gRenderer = nullptr;
     }
     ANativeWindow* w = ANativeWindow_fromSurface(env, surface);
-    if (!w) {
-        LOGE("ANativeWindow_fromSurface returned null");
-        return;
-    }
+    if (!w) return;
     neo3d::gRenderer = new neo3d::VulkanRenderer(w);
     ANativeWindow_release(w);
     neo3d::gRenderer->start();
@@ -1243,48 +1263,40 @@ extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStop(
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_neo3d_engine_MainActivity_nativeStatus(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    std::string s = neo3d::gRenderer ? neo3d::gRenderer->status() : "Vulkan renderer stopped";
+    std::string s = neo3d::gRenderer ? neo3d::gRenderer->status() : "Stopped";
     return env->NewStringUTF(s.c_str());
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_neo3d_engine_MainActivity_nativeLoadGlb(JNIEnv* env, jobject, jbyteArray data) {
-    if (!data) return env->NewStringUTF("GLB import failed: no file data");
-    const jsize length = env->GetArrayLength(data);
-    if (length <= 0 || length > 128 * 1024 * 1024) return env->NewStringUTF("GLB import failed: file is empty or exceeds 128 MiB");
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
-    env->GetByteArrayRegion(data, 0, length, reinterpret_cast<jbyte*>(bytes.data()));
-    if (env->ExceptionCheck()) return env->NewStringUTF("GLB import failed: could not read selected file");
+    if (!data) return env->NewStringUTF("GLB failed: null data");
+    jsize len = env->GetArrayLength(data);
+    std::vector<uint8_t> bytes(static_cast<size_t>(len));
+    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte*>(bytes.data()));
 
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    if (!neo3d::gRenderer) return env->NewStringUTF("GLB import failed: start the viewport first");
-    const std::string result = neo3d::gRenderer->loadGlb(bytes);
-    return env->NewStringUTF(result.c_str());
+    if (!neo3d::gRenderer) return env->NewStringUTF("GLB failed: start engine first");
+    std::string res = neo3d::gRenderer->loadGlb(bytes);
+    return env->NewStringUTF(res.c_str());
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeOrbit(JNIEnv*, jobject, jfloat dx, jfloat dy) {
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeLook(JNIEnv*, jobject, jfloat dx, jfloat dy) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    if (neo3d::gRenderer) neo3d::gRenderer->orbit(dx, dy);
+    if (neo3d::gRenderer) neo3d::gRenderer->look(dx, dy);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeZoom(JNIEnv*, jobject, jfloat delta) {
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeJoystickMove(JNIEnv*, jobject, jfloat ix, jfloat iy) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    if (neo3d::gRenderer) neo3d::gRenderer->zoom(delta);
+    if (neo3d::gRenderer) neo3d::gRenderer->setJoystickInput(ix, iy);
 }
 
-// 3D Directional Movement: Up/Forward, Down/Backward, Left, Right
-extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeMoveCamera(JNIEnv*, jobject, jfloat forward, jfloat right) {
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeJump(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    if (neo3d::gRenderer) neo3d::gRenderer->moveCamera(forward, right);
+    if (neo3d::gRenderer) neo3d::gRenderer->triggerJump();
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeElevateCamera(JNIEnv*, jobject, jfloat up) {
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeUpdateSettings(JNIEnv*, jobject, jfloat fog, jfloat time, jfloat exp) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    if (neo3d::gRenderer) neo3d::gRenderer->elevateCamera(up);
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeSetAutoRotate(JNIEnv*, jobject, jboolean enabled) {
-    std::lock_guard<std::mutex> lock(neo3d::gMutex);
-    if (neo3d::gRenderer) neo3d::gRenderer->setAutoRotate(enabled == JNI_TRUE);
+    if (neo3d::gRenderer) neo3d::gRenderer->updateSettings(fog, time, exp);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeResetView(JNIEnv*, jobject) {
