@@ -1,6 +1,7 @@
 package com.neo3d.engine
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -17,6 +18,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeResize(width: Int, height: Int)
     private external fun nativeStop()
     private external fun nativeStatus(): String
+    private external fun nativeLoadGlb(data: ByteArray): String
     private external fun nativeOrbit(dx: Float, dy: Float)
     private external fun nativeSetAutoRotate(enabled: Boolean)
     private external fun nativeResetView()
@@ -25,6 +27,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var lastX = 0f
     private var lastY = 0f
     private var autoRotate = true
+    private val importRequestCode = 3107
 
     companion object { init { System.loadLibrary("neo3d") } }
 
@@ -40,7 +43,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         val reset = Button(this).apply { text = "Reset view"; setOnClickListener { nativeResetView(); autoRotate = true; rotate.text = "Auto: ON"; status.text = nativeStatus() } }
         val refresh = Button(this).apply { text = "GPU"; setOnClickListener { status.text = nativeStatus() } }
-        bar.addView(status); bar.addView(rotate); bar.addView(reset); bar.addView(refresh)
+        val import = Button(this).apply {
+            text = "Import GLB"
+            setOnClickListener {
+                val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("model/gltf-binary", "application/octet-stream"))
+                }
+                startActivityForResult(picker, importRequestCode)
+            }
+        }
+        bar.addView(status); bar.addView(import); bar.addView(rotate); bar.addView(reset); bar.addView(refresh)
         val viewport = SurfaceView(this)
         viewport.setBackgroundColor(0xFF10151D.toInt())
         viewport.holder.addCallback(this)
@@ -60,6 +74,31 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+    }
+
+    @Deprecated("Uses the platform document picker result callback for broad Android compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != importRequestCode || resultCode != RESULT_OK || data?.data == null) return
+        try {
+            val bytes = contentResolver.openInputStream(data.data!!)?.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(64 * 1024)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    if (total > 128 * 1024 * 1024) throw IllegalArgumentException("GLB exceeds 128 MiB limit")
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            } ?: throw IllegalStateException("Unable to open selected file")
+            if (!surfaceReady) throw IllegalStateException("Wait for the 3D viewport to start before importing")
+            status.text = nativeLoadGlb(bytes)
+        } catch (e: Exception) {
+            status.text = "Import failed: ${e.message ?: "unable to read file"}"
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) { nativeStart(holder.surface); surfaceReady = true; status.text = nativeStatus() }
