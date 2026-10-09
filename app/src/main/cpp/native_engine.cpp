@@ -64,6 +64,43 @@ public:
     void orbit(float dx,float dy) { yaw_.store(yaw_.load()+dx*0.009f); pitch_.store(std::clamp(pitch_.load()+dy*0.009f,-1.35f,1.35f)); }
     void setAutoRotate(bool value) { autoRotate_.store(value); }
     void resetView() { yaw_.store(0.0f); pitch_.store(-0.28f); autoRotate_.store(true); }
+    std::string loadGlb(const std::vector<std::uint8_t>& bytes) {
+        try {
+            auto decoded=assets::readGlbMeshes(bytes);
+            std::size_t vertexTotal=0,indexTotal=0;
+            for(const auto& p:decoded.primitives){vertexTotal+=p.vertices.size();indexTotal+=p.indices.size();}
+            if(vertexTotal==0||indexTotal==0||vertexTotal>UINT32_MAX||indexTotal>UINT32_MAX)
+                throw std::runtime_error("GLB mesh is empty or too large for 32-bit Vulkan indices");
+            std::vector<Vertex> vertices; vertices.reserve(vertexTotal);
+            std::vector<std::uint32_t> indices; indices.reserve(indexTotal);
+            float lo[3]={INFINITY,INFINITY,INFINITY},hi[3]={-INFINITY,-INFINITY,-INFINITY};
+            for(const auto& p:decoded.primitives)for(const auto& v:p.vertices)for(int k=0;k<3;++k){lo[k]=std::min(lo[k],v.position[k]);hi[k]=std::max(hi[k],v.position[k]);}
+            const float cx=(lo[0]+hi[0])*0.5f,cy=(lo[1]+hi[1])*0.5f,cz=(lo[2]+hi[2])*0.5f;
+            const float span=std::max({hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2]});
+            if(!std::isfinite(span)||span<1e-8f)throw std::runtime_error("GLB mesh has degenerate bounds");
+            const float scale=2.4f/span;
+            for(const auto& p:decoded.primitives){
+                const auto base=static_cast<std::uint32_t>(vertices.size());
+                for(const auto& v:p.vertices){Vertex out{};for(int k=0;k<3;++k)out.position[k]=(v.position[k]-(k==0?cx:k==1?cy:cz))*scale;std::copy(v.normal,v.normal+3,out.normal);vertices.push_back(out);}
+                for(auto index:p.indices)indices.push_back(base+index);
+            }
+            std::lock_guard<std::mutex> lock(gpuMutex_);
+            if(!device_)throw std::runtime_error("Vulkan device is not ready; retry GLB import after viewport starts");
+            check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(GLB upload)");
+            if(vertexBuffer_)vkDestroyBuffer(device_,vertexBuffer_,nullptr);
+            if(indexBuffer_)vkDestroyBuffer(device_,indexBuffer_,nullptr);
+            if(vertexMemory_)vkFreeMemory(device_,vertexMemory_,nullptr);
+            if(indexMemory_)vkFreeMemory(device_,indexMemory_,nullptr);
+            vertexBuffer_=indexBuffer_=VK_NULL_HANDLE;vertexMemory_=indexMemory_=VK_NULL_HANDLE;
+            createBuffer(vertices.size()*sizeof(Vertex),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,vertexBuffer_,vertexMemory_,vertices.data());
+            createBuffer(indices.size()*sizeof(std::uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT,indexBuffer_,indexMemory_,indices.data());
+            indexCount_=static_cast<std::uint32_t>(indices.size());importedModel_=true;
+            status_="GLB loaded | "+std::to_string(decoded.primitives.size())+" primitive(s) | "+std::to_string(vertexTotal)+" vertices | "+deviceName_;
+            LOGI("%s",status_.c_str());return status_;
+        } catch(const std::exception& e) {
+            status_=std::string("GLB import failed: ")+e.what();LOGE("%s",status_.c_str());return status_;
+        }
+    }
 private:
     ANativeWindow* window_=nullptr;
     VkInstance instance_=VK_NULL_HANDLE; VkSurfaceKHR surface_=VK_NULL_HANDLE;
@@ -83,7 +120,8 @@ private:
     uint32_t indexCount_=0;
     static constexpr size_t kFrames=2;
     std::array<VkSemaphore,kFrames> imageAvailable_{}; std::array<VkSemaphore,kFrames> renderFinished_{}; std::array<VkFence,kFrames> fences_{};
-    size_t frame_=0; std::atomic<bool> running_{false},resizeRequested_{false},autoRotate_{true}; std::atomic<float> yaw_{0.0f},pitch_{-0.28f}; std::thread thread_;
+    size_t frame_=0; std::atomic<bool> running_{false},resizeRequested_{false},autoRotate_{true};
+    std::mutex gpuMutex_; bool importedModel_=false; std::atomic<float> yaw_{0.0f},pitch_{-0.28f}; std::thread thread_;
     std::chrono::steady_clock::time_point started_{};
     std::string deviceName_="unknown GPU",status_="Vulkan renderer not initialized";
     std::mutex lifecycleMutex_;
@@ -232,14 +270,20 @@ private:
         Mat4 view=translate(0,0,-5.0f);
         Mat4 projection=perspective(static_cast<float>(extent_.width)/static_cast<float>(std::max(1u,extent_.height)));
         struct Push { Mat4 mvp; Mat4 model; };
-        const float positions[3]={-1.55f,0.0f,1.55f};
-        for(int object=0;object<3;++object) {
-            Mat4 local=multiply(rotateY(yaw+(object-1)*0.45f),rotateX(pitch_.load()+(object-1)*0.12f));
-            Mat4 model=multiply(translate(positions[object],object==1?0.0f:-0.12f,0.0f),local);
-            Mat4 mvp=multiply(projection,multiply(view,model));
-            Push push{mvp,model};
+        if(importedModel_) {
+            Mat4 model=multiply(rotateY(yaw),rotateX(pitch_.load()));
+            Mat4 mvp=multiply(projection,multiply(view,model));Push push{mvp,model};
             vkCmdPushConstants(commandBuffers_[i],pipelineLayout_,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
             vkCmdDrawIndexed(commandBuffers_[i],indexCount_,1,0,0,0);
+        } else {
+            const float positions[3]={-1.55f,0.0f,1.55f};
+            for(int object=0;object<3;++object) {
+                Mat4 local=multiply(rotateY(yaw+(object-1)*0.45f),rotateX(pitch_.load()+(object-1)*0.12f));
+                Mat4 model=multiply(translate(positions[object],object==1?0.0f:-0.12f,0.0f),local);
+                Mat4 mvp=multiply(projection,multiply(view,model));Push push{mvp,model};
+                vkCmdPushConstants(commandBuffers_[i],pipelineLayout_,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
+                vkCmdDrawIndexed(commandBuffers_[i],indexCount_,1,0,0,0);
+            }
         }
         vkCmdEndRenderPass(commandBuffers_[i]);check(vkEndCommandBuffer(commandBuffers_[i]),"vkEndCommandBuffer");
     }
@@ -253,6 +297,7 @@ private:
                 LOGE("%s",status_.c_str());
                 break;
             }
+            std::lock_guard<std::mutex> gpuLock(gpuMutex_);
             check(vkWaitForFences(device_,1,&fences_[frame_],VK_TRUE,UINT64_MAX),"vkWaitForFences");
             uint32_t imageIndex=0;VkResult ac=vkAcquireNextImageKHR(device_,swapchain_,UINT64_MAX,imageAvailable_[frame_],VK_NULL_HANDLE,&imageIndex);
             if(ac==VK_ERROR_OUT_OF_DATE_KHR){resizeRequested_.store(true);continue;}if(ac!=VK_SUCCESS&&ac!=VK_SUBOPTIMAL_KHR){LOGE("vkAcquireNextImageKHR=%d",ac);break;}
@@ -273,7 +318,7 @@ private:
         }
     }
     void rebuild(){
-        if(!device_)return;vkDeviceWaitIdle(device_);destroySwapchain();
+        if(!device_)return;std::lock_guard<std::mutex> gpuLock(gpuMutex_);vkDeviceWaitIdle(device_);destroySwapchain();
         try{createSwapchain();chooseDepthFormat();createRenderPass();createDepthResources();createFramebuffers();createCommands();createGraphicsPipeline();createSkyPipeline();status_="Vulkan 3D | "+deviceName_+" | "+std::to_string(extent_.width)+"x"+std::to_string(extent_.height)+" | indexed cube + depth + GGX PBR";}
         catch(const std::exception&e){status_=std::string("Swapchain rebuild failed: ")+e.what();LOGE("%s",status_.c_str());}
     }
@@ -308,6 +353,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStart
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeResize(JNIEnv*,jobject,jint w,jint h){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->resize(w,h);}
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStop(JNIEnv*,jobject){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer){neo3d::gRenderer->stop();delete neo3d::gRenderer;neo3d::gRenderer=nullptr;}}
 extern "C" JNIEXPORT jstring JNICALL Java_com_neo3d_engine_MainActivity_nativeStatus(JNIEnv* env,jobject){std::lock_guard<std::mutex> lock(neo3d::gMutex);std::string s=neo3d::gRenderer?neo3d::gRenderer->status():"Vulkan renderer stopped";return env->NewStringUTF(s.c_str());}
+extern "C" JNIEXPORT jstring JNICALL Java_com_neo3d_engine_MainActivity_nativeLoadGlb(JNIEnv* env,jobject,jbyteArray data){
+    if(!data)return env->NewStringUTF("GLB import failed: no file data");
+    const jsize length=env->GetArrayLength(data);
+    if(length<=0||length>128*1024*1024)return env->NewStringUTF("GLB import failed: file is empty or exceeds 128 MiB");
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+    env->GetByteArrayRegion(data,0,length,reinterpret_cast<jbyte*>(bytes.data()));
+    if(env->ExceptionCheck())return env->NewStringUTF("GLB import failed: could not read selected file");
+    std::lock_guard<std::mutex> lock(neo3d::gMutex);
+    if(!neo3d::gRenderer)return env->NewStringUTF("GLB import failed: start the viewport first");
+    const std::string result=neo3d::gRenderer->loadGlb(bytes);return env->NewStringUTF(result.c_str());
+}
 
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeOrbit(JNIEnv*,jobject,jfloat dx,jfloat dy){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->orbit(dx,dy);}
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeSetAutoRotate(JNIEnv*,jobject,jboolean enabled){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->setAutoRotate(enabled==JNI_TRUE);}
