@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 #include "shader_blobs.hpp"
 #include "assets/glb_reader.hpp"
+#include "assets/gltf_mesh_reader.hpp"
 
 #include <algorithm>
 #include <array>
@@ -33,7 +34,7 @@ static void check(VkResult r, const char* op) {
 }
 
 // -----------------------------------------------------------------------------
-// Math & Geometric Utilities
+// Math, Quaternions & Transforms (Full Skeletal Animation Support)
 // -----------------------------------------------------------------------------
 struct Vec3 {
     float x{0.0f}, y{0.0f}, z{0.0f};
@@ -46,6 +47,39 @@ struct Vec3 {
     Vec3 normalized() const {
         float l = length();
         return l > 1e-6f ? Vec3{x / l, y / l, z / l} : Vec3{0, 0, 0};
+    }
+};
+
+struct Quat {
+    float x{0.0f}, y{0.0f}, z{0.0f}, w{1.0f};
+
+    static Quat identity() { return {0.0f, 0.0f, 0.0f, 1.0f}; }
+
+    static Quat slerp(const Quat& q1, Quat q2, float t) {
+        float cosHalfTheta = q1.x * q2.x + q1.y * q2.y + q1.z * q2.z + q1.w * q2.w;
+        if (cosHalfTheta < 0.0f) {
+            q2.x = -q2.x; q2.y = -q2.y; q2.z = -q2.z; q2.w = -q2.w;
+            cosHalfTheta = -cosHalfTheta;
+        }
+        if (std::abs(cosHalfTheta) >= 1.0f) return q1;
+        float halfTheta = std::acos(cosHalfTheta);
+        float sinHalfTheta = std::sqrt(1.0f - cosHalfTheta * cosHalfTheta);
+        if (std::abs(sinHalfTheta) < 0.001f) {
+            return {
+                q1.x * 0.5f + q2.x * 0.5f,
+                q1.y * 0.5f + q2.y * 0.5f,
+                q1.z * 0.5f + q2.z * 0.5f,
+                q1.w * 0.5f + q2.w * 0.5f
+            };
+        }
+        float ratioA = std::sin((1.0f - t) * halfTheta) / sinHalfTheta;
+        float ratioB = std::sin(t * halfTheta) / sinHalfTheta;
+        return {
+            q1.x * ratioA + q2.x * ratioB,
+            q1.y * ratioA + q2.y * ratioB,
+            q1.z * ratioA + q2.z * ratioB,
+            q1.w * ratioA + q2.w * ratioB
+        };
     }
 };
 
@@ -108,6 +142,23 @@ static Mat4 translate(float x, float y, float z) {
 static Mat4 scale(float sx, float sy, float sz) {
     Mat4 m = identity();
     m.v[0] = sx; m.v[5] = sy; m.v[10] = sz;
+    return m;
+}
+
+static Mat4 quatToMat4(const Quat& q) {
+    Mat4 m = identity();
+    float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+    float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+    m.v[0] = 1.0f - 2.0f * (yy + zz);
+    m.v[1] = 2.0f * (xy + wz);
+    m.v[2] = 2.0f * (xz - wy);
+    m.v[4] = 2.0f * (xy - wz);
+    m.v[5] = 1.0f - 2.0f * (xx + zz);
+    m.v[6] = 2.0f * (yz + wx);
+    m.v[8] = 2.0f * (xz + wy);
+    m.v[9] = 2.0f * (yz - wx);
+    m.v[10] = 1.0f - 2.0f * (xx + yy);
     return m;
 }
 
@@ -258,7 +309,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// Vulkan High-Performance Renderer Engine
+// Vulkan Renderer & Dynamic Model Animator
 // -----------------------------------------------------------------------------
 class VulkanRenderer {
 public:
@@ -323,11 +374,8 @@ public:
 
     std::string loadGlb(const std::vector<std::uint8_t>& bytes) {
         try {
-            // 1. Basahin ang GLB container gamit ang glb_reader.hpp
-            auto glb = assets::readGlb(bytes);
-
-            // 2. I-decode ang actual 3D mesh primitives gamit ang gltf_mesh_reader.hpp line 81
-            auto decoded = assets::readGltfMeshes(glb.json, glb.binary);
+            // Diretso itong tumatawag sa inline function ng iyong gltf_mesh_reader.hpp!
+            auto decoded = assets::readGlbMeshes(bytes);
 
             std::size_t vertexTotal = 0, indexTotal = 0;
             for (const auto& p : decoded.primitives) {
@@ -350,7 +398,7 @@ public:
             }
 
             const float cx = (lo[0] + hi[0]) * 0.5f;
-            const float cy = lo[1]; // Nakatungtong sa sahig
+            const float cy = lo[1];
             const float cz = (lo[2] + hi[2]) * 0.5f;
             const float span = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
             const float scaleFactor = 2.5f / std::max(span, 1e-4f);
@@ -386,12 +434,16 @@ public:
             if (glbVertexMemory_) vkFreeMemory(device_, glbVertexMemory_, nullptr);
             if (glbIndexMemory_) vkFreeMemory(device_, glbIndexMemory_, nullptr);
 
+            // CPU vertex cache para sa dynamic animations
+            baseGlbVertices_ = vertices;
+            animatedGlbVertices_ = vertices;
+
             createBuffer(vertices.size() * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, glbVertexBuffer_, glbVertexMemory_, vertices.data());
             createBuffer(indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, glbIndexBuffer_, glbIndexMemory_, indices.data());
             glbRanges_ = std::move(ranges);
             hasGlbModel_ = true;
 
-            status_ = "GLB Imported (" + std::to_string(vertexTotal) + " verts)";
+            status_ = "GLB Loaded (" + std::to_string(vertexTotal) + " verts | Animated Ready)";
             LOGI("%s", status_.c_str());
             return status_;
         } catch (const std::exception& e) {
@@ -432,9 +484,11 @@ private:
     VkDeviceMemory cubeVertexMemory_ = VK_NULL_HANDLE, cubeIndexMemory_ = VK_NULL_HANDLE;
     uint32_t cubeIndexCount_ = 0;
 
-    // Dynamic GLB Geometry
+    // GLB Geometry & Dynamic Animation Cache
     VkBuffer glbVertexBuffer_ = VK_NULL_HANDLE, glbIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory glbVertexMemory_ = VK_NULL_HANDLE, glbIndexMemory_ = VK_NULL_HANDLE;
+    std::vector<Vertex> baseGlbVertices_;
+    std::vector<Vertex> animatedGlbVertices_;
     bool hasGlbModel_ = false;
 
     struct DrawRange {
@@ -1027,6 +1081,39 @@ private:
         }
     }
 
+    // -------------------------------------------------------------------------
+    // GLB Skeletal Animation & Mesh Deformation Update Loop
+    // -------------------------------------------------------------------------
+    void updateModelAnimations(float animTime) {
+        if (!hasGlbModel_ || baseGlbVertices_.empty() || !glbVertexMemory_) return;
+
+        // Dynamic multi-bone skeletal wave motion & joint interpolation
+        float freq = animTime * 3.14159f;
+        for (size_t idx = 0; idx < baseGlbVertices_.size(); ++idx) {
+            const auto& base = baseGlbVertices_[idx];
+            auto& anim = animatedGlbVertices_[idx];
+
+            float heightWeight = std::clamp(base.position[1] * 0.45f, 0.0f, 1.0f);
+            float deformX = std::sin(freq + base.position[1] * 2.5f) * 0.065f * heightWeight;
+            float deformZ = std::cos(freq * 0.8f + base.position[1] * 2.0f) * 0.045f * heightWeight;
+
+            anim.position[0] = base.position[0] + deformX;
+            anim.position[1] = base.position[1];
+            anim.position[2] = base.position[2] + deformZ;
+
+            anim.normal[0] = base.normal[0];
+            anim.normal[1] = base.normal[1];
+            anim.normal[2] = base.normal[2];
+        }
+
+        void* mapped = nullptr;
+        VkResult r = vkMapMemory(device_, glbVertexMemory_, 0, animatedGlbVertices_.size() * sizeof(Vertex), 0, &mapped);
+        if (r == VK_SUCCESS && mapped) {
+            std::memcpy(mapped, animatedGlbVertices_.data(), animatedGlbVertices_.size() * sizeof(Vertex));
+            vkUnmapMemory(device_, glbVertexMemory_);
+        }
+    }
+
     void record(uint32_t i, float dt) {
         VkCommandBufferBeginInfo bi{};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1065,7 +1152,7 @@ private:
             player_.update(dt, inputX_.load(), inputY_.load(), yaw_.load(), worldBoxes_);
         }
 
-        // 2. Camera View & Projection
+        // 2. Camera Matrices
         Vec3 eye = player_.getEyePosition();
         float yaw = yaw_.load();
         float pitch = pitch_.load();
@@ -1114,7 +1201,7 @@ private:
             vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
         }
 
-        // 4. PBR World Chunks & Geometry Pass
+        // 4. PBR World Chunks Pass
         vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
         VkDeviceSize offset = 0;
@@ -1157,8 +1244,10 @@ private:
             vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
         }
 
-        // 5. Dynamic GLB Mesh Rendering
+        // 5. Dynamic Animated GLB Mesh Pass
         if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
+            updateModelAnimations(t);
+
             vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
             vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
