@@ -200,9 +200,20 @@ private:
         vkCmdBeginRenderPass(commandBuffers_[i],&rp,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(commandBuffers_[i],VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
         VkDeviceSize offset=0;vkCmdBindVertexBuffers(commandBuffers_[i],0,1,&vertexBuffer_,&offset);vkCmdBindIndexBuffer(commandBuffers_[i],indexBuffer_,0,VK_INDEX_TYPE_UINT32);
         float t=std::chrono::duration<float>(std::chrono::steady_clock::now()-started_).count();
-        float yaw=autoRotate_.load()?t*0.65f:yaw_.load(); Mat4 model=multiply(rotateY(yaw),rotateX(pitch_.load()));Mat4 view=translate(0,0,-4.4f);Mat4 mvp=multiply(perspective(static_cast<float>(extent_.width)/static_cast<float>(std::max(1u,extent_.height))),multiply(view,model));
-        struct Push{Mat4 mvp;Mat4 model;} push{mvp,model};vkCmdPushConstants(commandBuffers_[i],pipelineLayout_,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
-        vkCmdDrawIndexed(commandBuffers_[i],indexCount_,1,0,0,0);vkCmdEndRenderPass(commandBuffers_[i]);check(vkEndCommandBuffer(commandBuffers_[i]),"vkEndCommandBuffer");
+        float yaw=autoRotate_.load()?t*0.65f:yaw_.load();
+        Mat4 view=translate(0,0,-5.0f);
+        Mat4 projection=perspective(static_cast<float>(extent_.width)/static_cast<float>(std::max(1u,extent_.height)));
+        struct Push { Mat4 mvp; Mat4 model; };
+        const float positions[3]={-1.55f,0.0f,1.55f};
+        for(int object=0;object<3;++object) {
+            Mat4 local=multiply(rotateY(yaw+(object-1)*0.45f),rotateX(pitch_.load()+(object-1)*0.12f));
+            Mat4 model=multiply(translate(positions[object],object==1?0.0f:-0.12f,0.0f),local);
+            Mat4 mvp=multiply(projection,multiply(view,model));
+            Push push{mvp,model};
+            vkCmdPushConstants(commandBuffers_[i],pipelineLayout_,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
+            vkCmdDrawIndexed(commandBuffers_[i],indexCount_,1,0,0,0);
+        }
+        vkCmdEndRenderPass(commandBuffers_[i]);check(vkEndCommandBuffer(commandBuffers_[i]),"vkEndCommandBuffer");
     }
     void renderLoop(){
         while(running_.load()){
