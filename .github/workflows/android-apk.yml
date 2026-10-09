@@ -1,0 +1,124 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "app/**"
+      - "android/**"
+      - "gradle/**"
+      - "build.gradle"
+      - "build.gradle.kts"
+      - "settings.gradle"
+      - "settings.gradle.kts"
+      - "gradlew"
+      - "gradle.properties"
+      - ".github/workflows/android-apk.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "android/**"
+      - "gradle/**"
+      - "build.gradle"
+      - "build.gradle.kts"
+      - "settings.gradle"
+      - "settings.gradle.kts"
+      - "gradlew"
+      - "gradle.properties"
+      - ".github/workflows/android-apk.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build and validate Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Check Android project exists
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f ./gradlew ]]; then
+            echo "::error::Android APK build blocked: repository has no Gradle wrapper (./gradlew). Add and validate the actual Android project before an APK can be built."
+            exit 1
+          fi
+          if [[ ! -f settings.gradle && ! -f settings.gradle.kts ]]; then
+            echo "::error::Android APK build blocked: settings.gradle or settings.gradle.kts is missing."
+            exit 1
+          fi
+          if [[ ! -f gradle/wrapper/gradle-wrapper.properties ]]; then
+            echo "::error::Android APK build blocked: Gradle wrapper configuration is missing."
+            exit 1
+          fi
+          chmod +x ./gradlew
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Android debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace test
+
+      - name: Validate and locate APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find . -type f -path '*/build/outputs/apk/*/*.apk' -not -path '*/build/intermediates/*' | sort)
+          if (( ${#apks[@]} == 0 )); then
+            echo "::error::assembleDebug completed but no APK was found under build/outputs/apk."
+            exit 1
+          fi
+          mkdir -p validated-apk
+          for apk in "${apks[@]}"; do
+            test -s "$apk"
+            cp "$apk" "validated-apk/$(basename "$(dirname "$apk")")-$(basename "$apk")"
+          done
+          printf 'Found %s APK file(s).\n' "${#apks[@]}"
+          ls -lh validated-apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-3d-android-apk
+          path: validated-apk/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-3d-android-build-diagnostics
+          path: |
+            **/build/reports/**
+            **/build/test-results/**
+            **/build/outputs/logs/**
+          if-no-files-found: ignore
+          retention-days: 7
