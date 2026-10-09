@@ -300,12 +300,12 @@ private:
             std::lock_guard<std::mutex> gpuLock(gpuMutex_);
             check(vkWaitForFences(device_,1,&fences_[frame_],VK_TRUE,UINT64_MAX),"vkWaitForFences");
             uint32_t imageIndex=0;VkResult ac=vkAcquireNextImageKHR(device_,swapchain_,UINT64_MAX,imageAvailable_[frame_],VK_NULL_HANDLE,&imageIndex);
-            if(ac==VK_ERROR_OUT_OF_DATE_KHR){resizeRequested_.store(true);continue;}if(ac!=VK_SUCCESS&&ac!=VK_SUBOPTIMAL_KHR){LOGE("vkAcquireNextImageKHR=%d",ac);break;}
+            if(ac==VK_ERROR_OUT_OF_DATE_KHR){resizeRequested_.store(true);continue;}if(ac!=VK_SUCCESS&&ac!=VK_SUBOPTIMAL_KHR){status_="Vulkan frame error: vkAcquireNextImageKHR result="+std::to_string(static_cast<int>(ac));LOGE("%s",status_.c_str());break;}
             vkResetFences(device_,1,&fences_[frame_]);vkResetCommandBuffer(commandBuffers_[imageIndex],0);record(imageIndex);
             VkPipelineStageFlags wait=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.waitSemaphoreCount=1;si.pWaitSemaphores=&imageAvailable_[frame_];si.pWaitDstStageMask=&wait;si.commandBufferCount=1;si.pCommandBuffers=&commandBuffers_[imageIndex];si.signalSemaphoreCount=1;si.pSignalSemaphores=&renderFinished_[frame_];
-            VkResult sub=vkQueueSubmit(graphicsQueue_,1,&si,fences_[frame_]);if(sub!=VK_SUCCESS){LOGE("vkQueueSubmit=%d",sub);break;}
+            VkResult sub=vkQueueSubmit(graphicsQueue_,1,&si,fences_[frame_]);if(sub!=VK_SUCCESS){status_="Vulkan frame error: vkQueueSubmit result="+std::to_string(static_cast<int>(sub));LOGE("%s",status_.c_str());break;}
             VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};pi.waitSemaphoreCount=1;pi.pWaitSemaphores=&renderFinished_[frame_];pi.swapchainCount=1;pi.pSwapchains=&swapchain_;pi.pImageIndices=&imageIndex;VkResult pr=vkQueuePresentKHR(presentQueue_,&pi);
-            if(pr==VK_ERROR_OUT_OF_DATE_KHR||pr==VK_SUBOPTIMAL_KHR||ac==VK_SUBOPTIMAL_KHR)resizeRequested_.store(true);else if(pr!=VK_SUCCESS){LOGE("vkQueuePresentKHR=%d",pr);status_="Vulkan presentation failed: "+std::to_string(static_cast<int>(pr));break;}frame_=(frame_+1)%kFrames;
+            if(pr==VK_ERROR_OUT_OF_DATE_KHR||pr==VK_SUBOPTIMAL_KHR||ac==VK_SUBOPTIMAL_KHR)resizeRequested_.store(true);else if(pr!=VK_SUCCESS){status_="Vulkan presentation failed: VkResult="+std::to_string(static_cast<int>(pr));LOGE("%s",status_.c_str());break;}frame_=(frame_+1)%kFrames;
         }
         } catch(const std::exception& e) {
             status_=std::string("Vulkan render-loop failure: ")+e.what();
