@@ -2,15 +2,24 @@
 
 layout(push_constant) uniform SkyPush {
     mat4 invViewProj;
-    vec4 sunDir;
+    vec4 cameraPos;   // xyz: cameraPos, w: time
+    vec4 sunDir;      // xyz: sunDir, w: exposure
+    vec4 envParams;   // x: fogDensity, y: timeOfDay, z: cloudCoverage, w: windSpeed
 } skyData;
 
 layout(location = 0) out vec3 vRayDir;
+layout(location = 1) out vec3 vCamPos;
 
 void main() {
-    vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
-    vec4 clip = vec4(p * 2.0 - 1.0, 1.0, 1.0);
+    // Fullscreen triangle trick (gl_VertexIndex: 0, 1, 2)
+    vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+    vec4 clip = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
     vec4 world = skyData.invViewProj * clip;
-    vRayDir = world.xyz / world.w;
-    gl_Position = vec4(p * 2.0 - 1.0, 0.9999, 1.0);
+    
+    vCamPos = skyData.cameraPos.xyz;
+    // Unprojected ray direction mula sa camera papuntang far plane
+    vRayDir = normalize(world.xyz / world.w - skyData.cameraPos.xyz);
+    
+    // Far plane depth
+    gl_Position = vec4(uv * 2.0 - 1.0, 0.99999, 1.0);
 }
