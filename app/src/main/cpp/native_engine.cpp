@@ -487,9 +487,12 @@ private:
     };
 
     struct SkyPushConstants {
-        Mat4 invViewProj;
-        float sunDir[4];
-    };
+    Mat4 invViewProj;   // 64 bytes
+    float cameraPos[4]; // 16 bytes: xyz = eyePos, w = time
+    float sunDir[4];    // 16 bytes: xyz = sunDir, w = exposure
+    float envParams[4]; // 16 bytes: x = fogDensity, y = timeOfDay, z = coverage, w = windSpeed
+};
+// Total: 112 bytes (perpektong pasok sa 128-byte Vulkan spec limit)
 
     void buildWorldChunks() {
         worldBoxes_.clear();
@@ -842,7 +845,7 @@ private:
 
         VkPushConstantRange range{};
         range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        range.offset = 0
+        range.offset = 0;
         range.size = sizeof(MeshPushConstants);
 
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -922,6 +925,7 @@ private:
 
         VkPushConstantRange range{};
         range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        range.offset = 0;
         range.size = sizeof(SkyPushConstants);
 
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -992,119 +996,185 @@ private:
     }
 
     void record(uint32_t i, float dt) {
-        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        check(vkBeginCommandBuffer(commandBuffers_[i], &bi), "vkBeginCommandBuffer");
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    check(vkBeginCommandBuffer(commandBuffers_[i], &bi), "vkBeginCommandBuffer");
 
-        VkClearValue clears[2]{};
-        clears[0].color = {{0.05f, 0.08f, 0.14f, 1.0f}};
-        clears[1].depthStencil = {1.0f, 0};
+    // Dynamic clear color batay sa sun elevation (Mas madilim sa gabi, bluish sa araw)
+    float timeOfDay = timeOfDay_.load();
+    float sunAngle = (timeOfDay / 24.0f) * 6.2831853f - 1.5707963f;
+    float sunElev = std::sin(sunAngle);
 
-        VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        rp.renderPass = renderPass_;
-        rp.framebuffer = framebuffers_[i];
-        rp.renderArea = {{0, 0}, extent_};
-        rp.clearValueCount = 2;
-        rp.pClearValues = clears;
-
-        vkCmdBeginRenderPass(commandBuffers_[i], &rp, VK_SUBPASS_CONTENTS_INLINE);
-
-        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
-
-        // 1. Physics Engine Step
-        {
-            std::lock_guard<std::mutex> lock(physicsMutex_);
-            if (jumpRequested_.exchange(false)) {
-                player_.jump();
-            }
-            player_.update(dt, inputX_.load(), inputY_.load(), yaw_.load(), worldBoxes_);
-        }
-
-        // 2. Camera Orientation Calculation
-        Vec3 eye = player_.getEyePosition();
-        float yaw = yaw_.load();
-        float pitch = pitch_.load();
-        Vec3 forward = {
-            std::sin(yaw) * std::cos(pitch),
-            -std::sin(pitch),
-            -std::cos(yaw) * std::cos(pitch)
-        };
-        Vec3 target = eye + forward;
-
-        Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
-        Mat4 proj = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
-        Mat4 viewProj = multiply(proj, view);
-
-        // Calculate Sun Direction from Time of Day
-        float sunAngle = (timeOfDay_.load() / 24.0f) * 6.2831853f - 1.5707963f;
-        float sunDir[4] = {std::cos(sunAngle), std::sin(sunAngle), 0.35f, exposure_.load()};
-
-        // 3. Render Sky Dome with Volumetric Moving Clouds
-        if (skyPipeline_ != VK_NULL_HANDLE) {
-            SkyPushConstants skyPush{};
-            skyPush.invViewProj = inverseMat4(viewProj);
-            skyPush.sunDir[0] = sunDir[0];
-            skyPush.sunDir[1] = sunDir[1];
-            skyPush.sunDir[2] = sunDir[2];
-            skyPush.sunDir[3] = t;
-
-            vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
-            vkCmdPushConstants(commandBuffers_[i], skyPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyPushConstants), &skyPush);
-            vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
-        }
-
-        // 4. Render 3D World Meshes & Boxes (Cook-Torrance PBR)
-        vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &cubeVertexBuffer_, &offset);
-        vkCmdBindIndexBuffer(commandBuffers_[i], cubeIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-
-        MeshPushConstants push{};
-        push.cameraPos[0] = eye.x; push.cameraPos[1] = eye.y; push.cameraPos[2] = eye.z; push.cameraPos[3] = t;
-        std::copy(sunDir, sunDir + 4, push.sunDir);
-        push.envParams[0] = fogDensity_.load();
-        push.envParams[1] = timeOfDay_.load();
-
-        // Draw Static Terrain / Box Chunks
-        for (const auto& b : worldBoxes_) {
-            Vec3 size = b.box.max - b.box.min;
-            Vec3 center = (b.box.min + b.box.max) * 0.5f;
-
-            Mat4 model = multiply(translate(center.x, center.y, center.z), scale(size.x, size.y, size.z));
-            push.model = model;
-            push.mvp = multiply(viewProj, model);
-            std::copy(b.color, b.color + 4, push.baseColor);
-            push.material[0] = b.metallic;
-            push.material[1] = b.roughness;
-            push.material[2] = 1.0f; // AO
-
-            vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
-            vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
-        }
-
-        // 5. Draw Imported GLB Mesh if present
-        if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
-            vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
-            vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-
-            Mat4 model = translate(0.0f, 0.0f, -6.0f);
-            push.model = model;
-            push.mvp = multiply(viewProj, model);
-
-            for (const auto& r : glbRanges_) {
-                std::copy(r.baseColor, r.baseColor + 4, push.baseColor);
-                push.material[0] = r.metallic;
-                push.material[1] = r.roughness;
-                push.material[2] = 1.0f;
-
-                vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
-                vkCmdDrawIndexed(commandBuffers_[i], r.indexCount, 1, r.firstIndex, 0, 0);
-            }
-        }
-
-        vkCmdEndRenderPass(commandBuffers_[i]);
-        check(vkEndCommandBuffer(commandBuffers_[i]), "vkEndCommandBuffer");
+    VkClearValue clears[2]{};
+    if (sunElev > 0.0f) {
+        clears[0].color = {{0.08f * sunElev, 0.16f * sunElev, 0.28f * sunElev, 1.0f}};
+    } else {
+        clears[0].color = {{0.005f, 0.008f, 0.015f, 1.0f}}; // Night clear
     }
+    clears[1].depthStencil = {1.0f, 0};
+
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rp.renderPass = renderPass_;
+    rp.framebuffer = framebuffers_[i];
+    rp.renderArea = {{0, 0}, extent_};
+    rp.clearValueCount = 2;
+    rp.pClearValues = clears;
+
+    vkCmdBeginRenderPass(commandBuffers_[i], &rp, VK_SUBPASS_CONTENTS_INLINE);
+
+    float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
+
+    // -------------------------------------------------------------------------
+    // 1. PHYSICS STEP: Character Controller & AABB Collisions
+    // -------------------------------------------------------------------------
+    {
+        std::lock_guard<std::mutex> lock(physicsMutex_);
+        if (jumpRequested_.exchange(false)) {
+            player_.jump();
+        }
+        player_.update(dt, inputX_.load(), inputY_.load(), yaw_.load(), worldBoxes_);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. CAMERA MATRICES: True FPS View Projection
+    // -------------------------------------------------------------------------
+    Vec3 eye = player_.getEyePosition();
+    float yaw = yaw_.load();
+    float pitch = pitch_.load();
+
+    Vec3 forward = {
+        std::sin(yaw) * std::cos(pitch),
+        -std::sin(pitch),
+        -std::cos(yaw) * std::cos(pitch)
+    };
+    Vec3 target = eye + forward;
+
+    Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
+    Mat4 proj = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
+    Mat4 viewProj = multiply(proj, view);
+
+    // Directional Sun Light Vector (XYZ) + Exposure (W)
+    float sunDir[4] = {
+        std::cos(sunAngle),
+        sunElev,
+        0.35f,
+        exposure_.load()
+    };
+
+    // -------------------------------------------------------------------------
+    // 3. PASS 1: Volumetric Atmosphere & Raymarched Clouds (Sky Pass)
+    // -------------------------------------------------------------------------
+    if (skyPipeline_ != VK_NULL_HANDLE) {
+        SkyPushConstants skyPush{};
+        skyPush.invViewProj = inverseMat4(viewProj);
+
+        // Eye position in meters + animation time
+        skyPush.cameraPos[0] = eye.x;
+        skyPush.cameraPos[1] = eye.y;
+        skyPush.cameraPos[2] = eye.z;
+        skyPush.cameraPos[3] = t;
+
+        // Sun Direction & ACES Camera Exposure
+        std::copy(sunDir, sunDir + 4, skyPush.sunDir);
+
+        // Environmental Sliders galing sa UI Settings
+        skyPush.envParams[0] = fogDensity_.load();
+        skyPush.envParams[1] = timeOfDay;
+        skyPush.envParams[2] = 0.52f; // Cloud coverage fraction
+        skyPush.envParams[3] = 1.0f;  // Wind speed multiplier
+
+        vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
+        vkCmdPushConstants(
+            commandBuffers_[i],
+            skyPipelineLayout_,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(SkyPushConstants),
+            &skyPush
+        );
+        vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0); // Fullscreen procedural triangle
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. PASS 2: Cook-Torrance GGX PBR Meshes & Terrain Chunks
+    // -------------------------------------------------------------------------
+    vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &cubeVertexBuffer_, &offset);
+    vkCmdBindIndexBuffer(commandBuffers_[i], cubeIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+
+    MeshPushConstants push{};
+    push.cameraPos[0] = eye.x;
+    push.cameraPos[1] = eye.y;
+    push.cameraPos[2] = eye.z;
+    push.cameraPos[3] = t;
+    std::copy(sunDir, sunDir + 4, push.sunDir);
+
+    push.envParams[0] = fogDensity_.load();
+    push.envParams[1] = timeOfDay;
+    push.envParams[2] = 0.0f;
+    push.envParams[3] = 0.0f;
+
+    // Render Static Physics Obstacle Boxes & Terrain Platforms
+    for (const auto& b : worldBoxes_) {
+        Vec3 size = b.box.max - b.box.min;
+        Vec3 center = (b.box.min + b.box.max) * 0.5f;
+
+        Mat4 model = multiply(translate(center.x, center.y, center.z), scale(size.x, size.y, size.z));
+        push.model = model;
+        push.mvp = multiply(viewProj, model);
+
+        std::copy(b.color, b.color + 4, push.baseColor);
+        push.material[0] = b.metallic;
+        push.material[1] = b.roughness;
+        push.material[2] = 1.0f; // Ambient Occlusion factor
+        push.material[3] = 0.0f;
+
+        vkCmdPushConstants(
+            commandBuffers_[i],
+            pipelineLayout_,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(MeshPushConstants),
+            &push
+        );
+        vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. PASS 3: Imported Dynamic GLB Model (Kung may na-import)
+    // -------------------------------------------------------------------------
+    if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
+        vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
+        vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+
+        // Nakatayo sa pedestal sa unahan (World Pos: 0, 0, -8)
+        Mat4 model = translate(0.0f, 0.0f, -8.0f);
+        push.model = model;
+        push.mvp = multiply(viewProj, model);
+
+        for (const auto& r : glbRanges_) {
+            std::copy(r.baseColor, r.baseColor + 4, push.baseColor);
+            push.material[0] = r.metallic;
+            push.material[1] = r.roughness;
+            push.material[2] = 1.0f;
+            push.material[3] = 0.0f;
+
+            vkCmdPushConstants(
+                commandBuffers_[i],
+                pipelineLayout_,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(MeshPushConstants),
+                &push
+            );
+            vkCmdDrawIndexed(commandBuffers_[i], r.indexCount, 1, r.firstIndex, 0, 0);
+        }
+    }
+
+    vkCmdEndRenderPass(commandBuffers_[i]);
+    check(vkEndCommandBuffer(commandBuffers_[i]), "vkEndCommandBuffer");
+}
 
     void renderLoop() {
         auto lastTime = std::chrono::steady_clock::now();
