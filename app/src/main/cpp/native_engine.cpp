@@ -140,9 +140,17 @@ public:
 
     void setAutoRotate(bool value) { autoRotate_.store(value); }
 
+    void zoom(float delta) { cameraDistance_.store(std::clamp(cameraDistance_.load() + delta, 1.5f, 30.0f)); }
+
+    void moveCamera(float forward, float right) {
+        cameraForward_.store(std::clamp(cameraForward_.load() + forward * 0.12f, -20.0f, 20.0f));
+        cameraRight_.store(std::clamp(cameraRight_.load() + right * 0.12f, -20.0f, 20.0f));
+    }
+
     void resetView() {
         yaw_.store(0.0f);
         pitch_.store(-0.28f);
+        cameraDistance_.store(5.0f); cameraForward_.store(0.0f); cameraRight_.store(0.0f);
         autoRotate_.store(true);
     }
 
@@ -268,6 +276,7 @@ private:
     std::mutex gpuMutex_;
     bool importedModel_ = false;
     std::atomic<float> yaw_{0.0f}, pitch_{-0.28f};
+    std::atomic<float> cameraDistance_{5.0f}, cameraForward_{0.0f}, cameraRight_{0.0f};
     std::thread thread_;
     std::chrono::steady_clock::time_point started_{};
     std::string deviceName_ = "unknown GPU", status_ = "Vulkan renderer not initialized";
@@ -867,7 +876,7 @@ private:
 
         float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
         float yaw = autoRotate_.load() ? t * 0.65f : yaw_.load();
-        Mat4 view = translate(0, 0, -5.0f);
+        Mat4 view = translate(-cameraRight_.load(), -cameraForward_.load(), -cameraDistance_.load());
         Mat4 projection = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
 
         struct Push { Mat4 mvp; Mat4 model; float baseColor[4]; float material[4]; };
@@ -1113,6 +1122,16 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_neo3d_engine_MainActivity_nativeLo
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeOrbit(JNIEnv*, jobject, jfloat dx, jfloat dy) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
     if (neo3d::gRenderer) neo3d::gRenderer->orbit(dx, dy);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeZoom(JNIEnv*, jobject, jfloat delta) {
+    std::lock_guard<std::mutex> lock(neo3d::gMutex);
+    if (neo3d::gRenderer) neo3d::gRenderer->zoom(delta);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeMoveCamera(JNIEnv*, jobject, jfloat forward, jfloat right) {
+    std::lock_guard<std::mutex> lock(neo3d::gMutex);
+    if (neo3d::gRenderer) neo3d::gRenderer->moveCamera(forward, right);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeSetAutoRotate(JNIEnv*, jobject, jboolean enabled) {
