@@ -323,13 +323,18 @@ public:
 
     std::string loadGlb(const std::vector<std::uint8_t>& bytes) {
         try {
-            auto decoded = assets::readGlbMeshes(bytes);
+            // 1. Basahin ang GLB container gamit ang glb_reader.hpp
+            auto glb = assets::readGlb(bytes);
+
+            // 2. I-decode ang actual 3D mesh primitives gamit ang gltf_mesh_reader.hpp line 81
+            auto decoded = assets::readGltfMeshes(glb.json, glb.binary);
+
             std::size_t vertexTotal = 0, indexTotal = 0;
             for (const auto& p : decoded.primitives) {
                 vertexTotal += p.vertices.size();
                 indexTotal += p.indices.size();
             }
-            if (vertexTotal == 0 || indexTotal == 0) throw std::runtime_error("Empty GLB mesh");
+            if (vertexTotal == 0 || indexTotal == 0) throw std::runtime_error("Empty GLB mesh primitives");
 
             std::vector<Vertex> vertices; vertices.reserve(vertexTotal);
             std::vector<std::uint32_t> indices; indices.reserve(indexTotal);
@@ -345,7 +350,7 @@ public:
             }
 
             const float cx = (lo[0] + hi[0]) * 0.5f;
-            const float cy = lo[1];
+            const float cy = lo[1]; // Nakatungtong sa sahig
             const float cz = (lo[2] + hi[2]) * 0.5f;
             const float span = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
             const float scaleFactor = 2.5f / std::max(span, 1e-4f);
@@ -373,7 +378,7 @@ public:
             }
 
             std::lock_guard<std::mutex> lock(gpuMutex_);
-            if (!device_) throw std::runtime_error("Device not ready");
+            if (!device_) throw std::runtime_error("Device not initialized");
             vkDeviceWaitIdle(device_);
 
             if (glbVertexBuffer_) vkDestroyBuffer(device_, glbVertexBuffer_, nullptr);
@@ -387,6 +392,7 @@ public:
             hasGlbModel_ = true;
 
             status_ = "GLB Imported (" + std::to_string(vertexTotal) + " verts)";
+            LOGI("%s", status_.c_str());
             return status_;
         } catch (const std::exception& e) {
             status_ = std::string("GLB failed: ") + e.what();
