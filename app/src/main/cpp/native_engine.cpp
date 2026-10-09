@@ -111,14 +111,6 @@ static Mat4 scale(float sx, float sy, float sz) {
     return m;
 }
 
-static Mat4 rotateY(float a) {
-    Mat4 m = identity();
-    float c = std::cos(a), s = std::sin(a);
-    m.v[0] = c;  m.v[2] = -s;
-    m.v[8] = s;  m.v[10] = c;
-    return m;
-}
-
 static Mat4 lookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
     Vec3 f = (target - eye).normalized();
     Vec3 s = {f.y * up.z - f.z * up.y, f.z * up.x - f.x * up.z, f.x * up.y - f.y * up.x};
@@ -176,10 +168,10 @@ struct PhysicsBox {
 
 class CharacterController {
 public:
-    Vec3 position{0.0f, 2.0f, 5.0f}; // Feet position
+    Vec3 position{0.0f, 2.0f, 5.0f};
     Vec3 velocity{0.0f, 0.0f, 0.0f};
     bool isGrounded{false};
-    float eyeHeight{1.72f}; // FPS Camera offset
+    float eyeHeight{1.72f};
     float radius{0.35f};
     float height{1.80f};
 
@@ -192,31 +184,27 @@ public:
 
     void jump() {
         if (isGrounded) {
-            velocity.y = 7.5f; // Initial vertical jump impulse
+            velocity.y = 7.5f;
             isGrounded = false;
         }
     }
 
     void update(float dt, float inputX, float inputY, float yaw, const std::vector<PhysicsBox>& colliders) {
-        // 1. Directional Movement Vector relative to Camera Look (Yaw)
         float sinY = std::sin(yaw);
         float cosY = std::cos(yaw);
         Vec3 forward = {sinY, 0.0f, -cosY};
         Vec3 right = {cosY, 0.0f, sinY};
 
-        float speed = 6.8f; // Walk/Run speed
+        float speed = 6.8f;
         Vec3 targetMove = (forward * inputY + right * inputX) * speed;
 
-        // Smooth horizontal acceleration
         velocity.x = targetMove.x;
         velocity.z = targetMove.z;
 
-        // 2. Realistic Gravity Acceleration
         const float kGravity = -18.5f;
         velocity.y += kGravity * dt;
-        if (velocity.y < -30.0f) velocity.y = -30.0f; // Terminal velocity clamp
+        if (velocity.y < -30.0f) velocity.y = -30.0f;
 
-        // 3. Collision Resolution along X, Z, and Y axes
         Vec3 stepX = position;
         stepX.x += velocity.x * dt;
         AABB boxX = getAABB(stepX);
@@ -235,13 +223,11 @@ public:
         }
         if (!colZ) position.z = stepZ.z;
 
-        // Vertical collision check
         Vec3 stepY = position;
         stepY.y += velocity.y * dt;
         AABB boxY = getAABB(stepY);
 
         isGrounded = false;
-        // Global Terrain Base Plane
         if (stepY.y <= 0.0f) {
             position.y = 0.0f;
             velocity.y = 0.0f;
@@ -250,11 +236,11 @@ public:
             bool colY = false;
             for (const auto& c : colliders) {
                 if (boxY.intersects(c.box)) {
-                    if (velocity.y < 0.0f) { // Falling onto surface
+                    if (velocity.y < 0.0f) {
                         position.y = c.box.max.y;
                         velocity.y = 0.0f;
                         isGrounded = true;
-                    } else if (velocity.y > 0.0f) { // Hitting ceiling
+                    } else if (velocity.y > 0.0f) {
                         position.y = c.box.min.y - height;
                         velocity.y = 0.0f;
                     }
@@ -359,7 +345,7 @@ public:
             }
 
             const float cx = (lo[0] + hi[0]) * 0.5f;
-            const float cy = lo[1]; // Rest on feet
+            const float cy = lo[1];
             const float cz = (lo[2] + hi[2]) * 0.5f;
             const float span = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
             const float scaleFactor = 2.5f / std::max(span, 1e-4f);
@@ -387,7 +373,7 @@ public:
             }
 
             std::lock_guard<std::mutex> lock(gpuMutex_);
-            if (!device_) throw std::runtime_error("Device not initialized");
+            if (!device_) throw std::runtime_error("Device not ready");
             vkDeviceWaitIdle(device_);
 
             if (glbVertexBuffer_) vkDestroyBuffer(device_, glbVertexBuffer_, nullptr);
@@ -440,14 +426,14 @@ private:
     VkDeviceMemory cubeVertexMemory_ = VK_NULL_HANDLE, cubeIndexMemory_ = VK_NULL_HANDLE;
     uint32_t cubeIndexCount_ = 0;
 
-    // GLB Dynamic Geometry
+    // Dynamic GLB Geometry
     VkBuffer glbVertexBuffer_ = VK_NULL_HANDLE, glbIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory glbVertexMemory_ = VK_NULL_HANDLE, glbIndexMemory_ = VK_NULL_HANDLE;
     bool hasGlbModel_ = false;
 
     struct DrawRange {
         uint32_t firstIndex = 0, indexCount = 0;
-        float baseColor[4]{1, 1, 1, 1};
+        float baseColor[4]{1.0f, 1.0f, 1.0f, 1.0f};
         float metallic = 0.5f, roughness = 0.5f;
     };
     std::vector<DrawRange> glbRanges_;
@@ -487,35 +473,30 @@ private:
     };
 
     struct SkyPushConstants {
-    Mat4 invViewProj;   // 64 bytes
-    float cameraPos[4]; // 16 bytes: xyz = eyePos, w = time
-    float sunDir[4];    // 16 bytes: xyz = sunDir, w = exposure
-    float envParams[4]; // 16 bytes: x = fogDensity, y = timeOfDay, z = coverage, w = windSpeed
-};
-// Total: 112 bytes (perpektong pasok sa 128-byte Vulkan spec limit)
+        Mat4 invViewProj;
+        float cameraPos[4];
+        float sunDir[4];
+        float envParams[4];
+    };
 
     void buildWorldChunks() {
         worldBoxes_.clear();
-        // Ground Foundation Chunk (Floor)
         worldBoxes_.push_back({{{-60.0f, -1.0f, -60.0f}, {60.0f, 0.0f, 60.0f}}, {0.22f, 0.28f, 0.24f, 1.0f}, 0.05f, 0.90f});
 
-        // Staircases and Obstacle Pillars
         for (int i = 0; i < 7; ++i) {
             float h = (i + 1) * 0.45f;
             float z = -2.0f - (i * 1.2f);
             worldBoxes_.push_back({{{-1.5f, 0.0f, z - 0.6f}, {1.5f, h, z + 0.6f}}, {0.65f, 0.58f, 0.48f, 1.0f}, 0.15f, 0.75f});
         }
 
-        // Platform Hub
         worldBoxes_.push_back({{{-6.0f, 3.15f, -18.0f}, {6.0f, 3.55f, -8.0f}}, {0.35f, 0.45f, 0.60f, 1.0f}, 0.40f, 0.35f});
-
-        // Metallic Pillar Towers
         worldBoxes_.push_back({{{-7.0f, 0.0f, -6.0f}, {-5.0f, 7.0f, -4.0f}}, {0.95f, 0.85f, 0.30f, 1.0f}, 0.95f, 0.15f});
         worldBoxes_.push_back({{{5.0f, 0.0f, -6.0f}, {7.0f, 7.0f, -4.0f}}, {0.92f, 0.92f, 0.95f, 1.0f}, 0.98f, 0.08f});
     }
 
     void initialize() {
-        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        VkApplicationInfo app{};
+        app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app.pApplicationName = "Neo-3D";
         app.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
         app.pEngineName = "Neo-3D Engine";
@@ -523,13 +504,15 @@ private:
         app.apiVersion = VK_API_VERSION_1_0;
 
         const char* exts[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
-        VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        VkInstanceCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         ci.pApplicationInfo = &app;
         ci.enabledExtensionCount = 2;
         ci.ppEnabledExtensionNames = exts;
         check(vkCreateInstance(&ci, nullptr, &instance_), "vkCreateInstance");
 
-        VkAndroidSurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+        VkAndroidSurfaceCreateInfoKHR si{};
+        si.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
         si.window = window_;
         check(vkCreateAndroidSurfaceKHR(instance_, &si, nullptr, &surface_), "vkCreateAndroidSurfaceKHR");
 
@@ -576,7 +559,7 @@ private:
                 return;
             }
         }
-        throw std::runtime_error("No GPU capable of graphics and presentation");
+        throw std::runtime_error("No physical device supports graphics and present");
     }
 
     void createDevice() {
@@ -584,7 +567,8 @@ private:
         std::vector<VkDeviceQueueCreateInfo> qs;
         for (uint32_t f : {graphicsFamily_, presentFamily_}) {
             if (std::any_of(qs.begin(), qs.end(), [f](const auto& q) { return q.queueFamilyIndex == f; })) continue;
-            VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            VkDeviceQueueCreateInfo q{};
+            q.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
             q.queueFamilyIndex = f;
             q.queueCount = 1;
             q.pQueuePriorities = &prio;
@@ -592,7 +576,8 @@ private:
         }
 
         const char* ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-        VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+        VkDeviceCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         ci.queueCreateInfoCount = static_cast<uint32_t>(qs.size());
         ci.pQueueCreateInfos = qs.data();
         ci.enabledExtensionCount = 1;
@@ -613,7 +598,8 @@ private:
     }
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buffer, VkDeviceMemory& mem, const void* data) {
-        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        VkBufferCreateInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bi.size = size;
         bi.usage = usage;
         bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -622,7 +608,8 @@ private:
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(device_, buffer, &req);
 
-        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        VkMemoryAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         check(vkAllocateMemory(device_, &ai, nullptr, &mem), "vkAllocateMemory");
@@ -681,7 +668,8 @@ private:
         uint32_t ic = caps.minImageCount + 1;
         if (caps.maxImageCount && ic > caps.maxImageCount) ic = caps.maxImageCount;
 
-        VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+        VkSwapchainCreateInfoKHR ci{};
+        ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
         ci.surface = surface_;
         ci.minImageCount = ic;
         ci.imageFormat = format_;
@@ -704,7 +692,8 @@ private:
 
         views_.resize(images_.size());
         for (size_t i = 0; i < images_.size(); ++i) {
-            VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            VkImageViewCreateInfo vi{};
+            vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
             vi.image = images_[i];
             vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
             vi.format = format_;
@@ -756,7 +745,8 @@ private:
         dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
         dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-        VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+        VkRenderPassCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         ci.attachmentCount = 2;
         ci.pAttachments = a.data();
         ci.subpassCount = 1;
@@ -773,7 +763,8 @@ private:
         depthViews_.resize(images_.size());
 
         for (size_t i = 0; i < images_.size(); ++i) {
-            VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+            VkImageCreateInfo ii{};
+            ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             ii.imageType = VK_IMAGE_TYPE_2D;
             ii.extent = {extent_.width, extent_.height, 1};
             ii.mipLevels = 1; ii.arrayLayers = 1;
@@ -786,13 +777,15 @@ private:
             VkMemoryRequirements req{};
             vkGetImageMemoryRequirements(device_, depthImages_[i], &req);
 
-            VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            VkMemoryAllocateInfo ai{};
+            ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
             ai.allocationSize = req.size;
             ai.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             check(vkAllocateMemory(device_, &ai, nullptr, &depthMemory_[i]), "vkAllocateMemory depth");
             check(vkBindImageMemory(device_, depthImages_[i], depthMemory_[i], 0), "vkBindImageMemory depth");
 
-            VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            VkImageViewCreateInfo vi{};
+            vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
             vi.image = depthImages_[i];
             vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
             vi.format = depthFormat_;
@@ -805,7 +798,8 @@ private:
         framebuffers_.resize(views_.size());
         for (size_t i = 0; i < views_.size(); ++i) {
             VkImageView atts[] = {views_[i], depthViews_[i]};
-            VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            VkFramebufferCreateInfo ci{};
+            ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
             ci.renderPass = renderPass_;
             ci.attachmentCount = 2;
             ci.pAttachments = atts;
@@ -817,13 +811,15 @@ private:
     }
 
     void createCommands() {
-        VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        VkCommandPoolCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pi.queueFamilyIndex = graphicsFamily_;
         check(vkCreateCommandPool(device_, &pi, nullptr, &commandPool_), "vkCreateCommandPool");
 
         commandBuffers_.resize(framebuffers_.size());
-        VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        VkCommandBufferAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         ai.commandPool = commandPool_;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = static_cast<uint32_t>(commandBuffers_.size());
@@ -831,7 +827,8 @@ private:
     }
 
     VkShaderModule createShader(const uint32_t* code, size_t sz) {
-        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        VkShaderModuleCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         ci.codeSize = sz;
         ci.pCode = code;
         VkShaderModule m = VK_NULL_HANDLE;
@@ -848,7 +845,8 @@ private:
         range.offset = 0;
         range.size = sizeof(MeshPushConstants);
 
-        VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayoutCreateInfo li{};
+        li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         li.pushConstantRangeCount = 1;
         li.pPushConstantRanges = &range;
         check(vkCreatePipelineLayout(device_, &li, nullptr, &pipelineLayout_), "vkCreatePipelineLayout");
@@ -863,46 +861,63 @@ private:
         stages[1].module = f;
         stages[1].pName = "main";
 
-        VkVertexInputBindingDescription b{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
-        VkVertexInputAttributeDescription a[2] = {
-            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
-            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)}
-        };
+        VkVertexInputBindingDescription b{};
+        b.binding = 0;
+        b.stride = sizeof(Vertex);
+        b.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkVertexInputAttributeDescription a[2]{};
+        a[0].location = 0;
+        a[0].binding = 0;
+        a[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        a[0].offset = offsetof(Vertex, position);
+        a[1].location = 1;
+        a[1].binding = 0;
+        a[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        a[1].offset = offsetof(Vertex, normal);
+
+        VkPipelineVertexInputStateCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vi.vertexBindingDescriptionCount = 1;
         vi.pVertexBindingDescriptions = &b;
         vi.vertexAttributeDescriptionCount = 2;
         vi.pVertexAttributeDescriptions = a;
 
-        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{};
+        ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
         ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
         VkViewport vp{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 1.0f};
         VkRect2D sc{{0, 0}, extent_};
-        VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        VkPipelineViewportStateCreateInfo vsi{};
+        vsi.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
         vsi.viewportCount = 1; vsi.pViewports = &vp;
         vsi.scissorCount = 1;  vsi.pScissors = &sc;
 
-        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        VkPipelineRasterizationStateCreateInfo rs{};
+        rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rs.polygonMode = VK_POLYGON_MODE_FILL;
         rs.cullMode = VK_CULL_MODE_NONE;
         rs.lineWidth = 1.0f;
 
-        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        VkPipelineMultisampleStateCreateInfo ms{};
+        ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-        VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        VkPipelineDepthStencilStateCreateInfo ds{};
+        ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         ds.depthTestEnable = VK_TRUE;
         ds.depthWriteEnable = VK_TRUE;
         ds.depthCompareOp = VK_COMPARE_OP_LESS;
 
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;
-        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineColorBlendStateCreateInfo bs{};
+        bs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         bs.attachmentCount = 1; bs.pAttachments = &ba;
 
-        VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        VkGraphicsPipelineCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pi.stageCount = 2; pi.pStages = stages;
         pi.pVertexInputState = &vi;
         pi.pInputAssemblyState = &ia;
@@ -928,7 +943,8 @@ private:
         range.offset = 0;
         range.size = sizeof(SkyPushConstants);
 
-        VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayoutCreateInfo li{};
+        li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         li.pushConstantRangeCount = 1;
         li.pPushConstantRanges = &range;
         check(vkCreatePipelineLayout(device_, &li, nullptr, &skyPipelineLayout_), "vkCreatePipelineLayout sky");
@@ -941,33 +957,41 @@ private:
         stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         stages[1].module = f; stages[1].pName = "main";
 
-        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        VkPipelineVertexInputStateCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo ia{};
+        ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
         ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
         VkViewport vp{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 1.0f};
         VkRect2D sc{{0, 0}, extent_};
-        VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        VkPipelineViewportStateCreateInfo vsi{};
+        vsi.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
         vsi.viewportCount = 1; vsi.pViewports = &vp;
         vsi.scissorCount = 1;  vsi.pScissors = &sc;
 
-        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        VkPipelineRasterizationStateCreateInfo rs{};
+        rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rs.polygonMode = VK_POLYGON_MODE_FILL;
         rs.cullMode = VK_CULL_MODE_NONE;
 
-        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        VkPipelineMultisampleStateCreateInfo ms{};
+        ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-        VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        VkPipelineDepthStencilStateCreateInfo ds{};
+        ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         ds.depthTestEnable = VK_FALSE;
         ds.depthWriteEnable = VK_FALSE;
 
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;
-        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineColorBlendStateCreateInfo bs{};
+        bs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         bs.attachmentCount = 1; bs.pAttachments = &ba;
 
-        VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        VkGraphicsPipelineCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pi.stageCount = 2; pi.pStages = stages;
         pi.pVertexInputState = &vi;
         pi.pInputAssemblyState = &ia;
@@ -985,8 +1009,10 @@ private:
     }
 
     void createSync() {
-        VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkSemaphoreCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VkFenceCreateInfo fi{};
+        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         for (size_t i = 0; i < kFrames; ++i) {
             check(vkCreateSemaphore(device_, &si, nullptr, &imageAvailable_[i]), "semA");
@@ -996,167 +1022,121 @@ private:
     }
 
     void record(uint32_t i, float dt) {
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    check(vkBeginCommandBuffer(commandBuffers_[i], &bi), "vkBeginCommandBuffer");
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        check(vkBeginCommandBuffer(commandBuffers_[i], &bi), "vkBeginCommandBuffer");
 
-    // Dynamic clear color batay sa sun elevation (Mas madilim sa gabi, bluish sa araw)
-    float timeOfDay = timeOfDay_.load();
-    float sunAngle = (timeOfDay / 24.0f) * 6.2831853f - 1.5707963f;
-    float sunElev = std::sin(sunAngle);
+        float timeOfDay = timeOfDay_.load();
+        float sunAngle = (timeOfDay / 24.0f) * 6.2831853f - 1.5707963f;
+        float sunElev = std::sin(sunAngle);
 
-    VkClearValue clears[2]{};
-    if (sunElev > 0.0f) {
-        clears[0].color = {{0.08f * sunElev, 0.16f * sunElev, 0.28f * sunElev, 1.0f}};
-    } else {
-        clears[0].color = {{0.005f, 0.008f, 0.015f, 1.0f}}; // Night clear
-    }
-    clears[1].depthStencil = {1.0f, 0};
-
-    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rp.renderPass = renderPass_;
-    rp.framebuffer = framebuffers_[i];
-    rp.renderArea = {{0, 0}, extent_};
-    rp.clearValueCount = 2;
-    rp.pClearValues = clears;
-
-    vkCmdBeginRenderPass(commandBuffers_[i], &rp, VK_SUBPASS_CONTENTS_INLINE);
-
-    float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
-
-    // -------------------------------------------------------------------------
-    // 1. PHYSICS STEP: Character Controller & AABB Collisions
-    // -------------------------------------------------------------------------
-    {
-        std::lock_guard<std::mutex> lock(physicsMutex_);
-        if (jumpRequested_.exchange(false)) {
-            player_.jump();
+        VkClearValue clears[2]{};
+        if (sunElev > 0.0f) {
+            clears[0].color = {{0.08f * sunElev, 0.16f * sunElev, 0.28f * sunElev, 1.0f}};
+        } else {
+            clears[0].color = {{0.005f, 0.008f, 0.015f, 1.0f}};
         }
-        player_.update(dt, inputX_.load(), inputY_.load(), yaw_.load(), worldBoxes_);
-    }
+        clears[1].depthStencil = {1.0f, 0};
 
-    // -------------------------------------------------------------------------
-    // 2. CAMERA MATRICES: True FPS View Projection
-    // -------------------------------------------------------------------------
-    Vec3 eye = player_.getEyePosition();
-    float yaw = yaw_.load();
-    float pitch = pitch_.load();
+        VkRenderPassBeginInfo rp{};
+        rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rp.renderPass = renderPass_;
+        rp.framebuffer = framebuffers_[i];
+        rp.renderArea = {{0, 0}, extent_};
+        rp.clearValueCount = 2;
+        rp.pClearValues = clears;
 
-    Vec3 forward = {
-        std::sin(yaw) * std::cos(pitch),
-        -std::sin(pitch),
-        -std::cos(yaw) * std::cos(pitch)
-    };
-    Vec3 target = eye + forward;
+        vkCmdBeginRenderPass(commandBuffers_[i], &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-    Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
-    Mat4 proj = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
-    Mat4 viewProj = multiply(proj, view);
+        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
 
-    // Directional Sun Light Vector (XYZ) + Exposure (W)
-    float sunDir[4] = {
-        std::cos(sunAngle),
-        sunElev,
-        0.35f,
-        exposure_.load()
-    };
+        // 1. Physics Step
+        {
+            std::lock_guard<std::mutex> lock(physicsMutex_);
+            if (jumpRequested_.exchange(false)) {
+                player_.jump();
+            }
+            player_.update(dt, inputX_.load(), inputY_.load(), yaw_.load(), worldBoxes_);
+        }
 
-    // -------------------------------------------------------------------------
-    // 3. PASS 1: Volumetric Atmosphere & Raymarched Clouds (Sky Pass)
-    // -------------------------------------------------------------------------
-    if (skyPipeline_ != VK_NULL_HANDLE) {
-        SkyPushConstants skyPush{};
-        skyPush.invViewProj = inverseMat4(viewProj);
+        // 2. Camera View & Projection
+        Vec3 eye = player_.getEyePosition();
+        float yaw = yaw_.load();
+        float pitch = pitch_.load();
 
-        // Eye position in meters + animation time
-        skyPush.cameraPos[0] = eye.x;
-        skyPush.cameraPos[1] = eye.y;
-        skyPush.cameraPos[2] = eye.z;
-        skyPush.cameraPos[3] = t;
+        Vec3 forward = {
+            std::sin(yaw) * std::cos(pitch),
+            -std::sin(pitch),
+            -std::cos(yaw) * std::cos(pitch)
+        };
+        Vec3 target = eye + forward;
 
-        // Sun Direction & ACES Camera Exposure
-        std::copy(sunDir, sunDir + 4, skyPush.sunDir);
+        Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
+        Mat4 proj = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
+        Mat4 viewProj = multiply(proj, view);
 
-        // Environmental Sliders galing sa UI Settings
-        skyPush.envParams[0] = fogDensity_.load();
-        skyPush.envParams[1] = timeOfDay;
-        skyPush.envParams[2] = 0.52f; // Cloud coverage fraction
-        skyPush.envParams[3] = 1.0f;  // Wind speed multiplier
+        float sunDir[4] = {
+            std::cos(sunAngle),
+            sunElev,
+            0.35f,
+            exposure_.load()
+        };
 
-        vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
-        vkCmdPushConstants(
-            commandBuffers_[i],
-            skyPipelineLayout_,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(SkyPushConstants),
-            &skyPush
-        );
-        vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0); // Fullscreen procedural triangle
-    }
+        // 3. Volumetric Sky Pass
+        if (skyPipeline_ != VK_NULL_HANDLE) {
+            SkyPushConstants skyPush{};
+            skyPush.invViewProj = inverseMat4(viewProj);
+            skyPush.cameraPos[0] = eye.x;
+            skyPush.cameraPos[1] = eye.y;
+            skyPush.cameraPos[2] = eye.z;
+            skyPush.cameraPos[3] = t;
+            std::copy(sunDir, sunDir + 4, skyPush.sunDir);
+            skyPush.envParams[0] = fogDensity_.load();
+            skyPush.envParams[1] = timeOfDay;
+            skyPush.envParams[2] = 0.52f;
+            skyPush.envParams[3] = 1.0f;
 
-    // -------------------------------------------------------------------------
-    // 4. PASS 2: Cook-Torrance GGX PBR Meshes & Terrain Chunks
-    // -------------------------------------------------------------------------
-    vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+            vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
+            vkCmdPushConstants(
+                commandBuffers_[i],
+                skyPipelineLayout_,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(SkyPushConstants),
+                &skyPush
+            );
+            vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
+        }
 
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &cubeVertexBuffer_, &offset);
-    vkCmdBindIndexBuffer(commandBuffers_[i], cubeIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+        // 4. PBR World Chunks & Geometry Pass
+        vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
-    MeshPushConstants push{};
-    push.cameraPos[0] = eye.x;
-    push.cameraPos[1] = eye.y;
-    push.cameraPos[2] = eye.z;
-    push.cameraPos[3] = t;
-    std::copy(sunDir, sunDir + 4, push.sunDir);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &cubeVertexBuffer_, &offset);
+        vkCmdBindIndexBuffer(commandBuffers_[i], cubeIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
-    push.envParams[0] = fogDensity_.load();
-    push.envParams[1] = timeOfDay;
-    push.envParams[2] = 0.0f;
-    push.envParams[3] = 0.0f;
+        MeshPushConstants push{};
+        push.cameraPos[0] = eye.x;
+        push.cameraPos[1] = eye.y;
+        push.cameraPos[2] = eye.z;
+        push.cameraPos[3] = t;
+        std::copy(sunDir, sunDir + 4, push.sunDir);
+        push.envParams[0] = fogDensity_.load();
+        push.envParams[1] = timeOfDay;
+        push.envParams[2] = 0.0f;
+        push.envParams[3] = 0.0f;
 
-    // Render Static Physics Obstacle Boxes & Terrain Platforms
-    for (const auto& b : worldBoxes_) {
-        Vec3 size = b.box.max - b.box.min;
-        Vec3 center = (b.box.min + b.box.max) * 0.5f;
+        for (const auto& b : worldBoxes_) {
+            Vec3 size = b.box.max - b.box.min;
+            Vec3 center = (b.box.min + b.box.max) * 0.5f;
 
-        Mat4 model = multiply(translate(center.x, center.y, center.z), scale(size.x, size.y, size.z));
-        push.model = model;
-        push.mvp = multiply(viewProj, model);
+            Mat4 model = multiply(translate(center.x, center.y, center.z), scale(size.x, size.y, size.z));
+            push.model = model;
+            push.mvp = multiply(viewProj, model);
 
-        std::copy(b.color, b.color + 4, push.baseColor);
-        push.material[0] = b.metallic;
-        push.material[1] = b.roughness;
-        push.material[2] = 1.0f; // Ambient Occlusion factor
-        push.material[3] = 0.0f;
-
-        vkCmdPushConstants(
-            commandBuffers_[i],
-            pipelineLayout_,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(MeshPushConstants),
-            &push
-        );
-        vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
-    }
-
-    // -------------------------------------------------------------------------
-    // 5. PASS 3: Imported Dynamic GLB Model (Kung may na-import)
-    // -------------------------------------------------------------------------
-    if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
-        vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
-        vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-
-        // Nakatayo sa pedestal sa unahan (World Pos: 0, 0, -8)
-        Mat4 model = translate(0.0f, 0.0f, -8.0f);
-        push.model = model;
-        push.mvp = multiply(viewProj, model);
-
-        for (const auto& r : glbRanges_) {
-            std::copy(r.baseColor, r.baseColor + 4, push.baseColor);
-            push.material[0] = r.metallic;
-            push.material[1] = r.roughness;
+            std::copy(b.color, b.color + 4, push.baseColor);
+            push.material[0] = b.metallic;
+            push.material[1] = b.roughness;
             push.material[2] = 1.0f;
             push.material[3] = 0.0f;
 
@@ -1168,13 +1148,40 @@ private:
                 sizeof(MeshPushConstants),
                 &push
             );
-            vkCmdDrawIndexed(commandBuffers_[i], r.indexCount, 1, r.firstIndex, 0, 0);
+            vkCmdDrawIndexed(commandBuffers_[i], cubeIndexCount_, 1, 0, 0, 0);
         }
-    }
 
-    vkCmdEndRenderPass(commandBuffers_[i]);
-    check(vkEndCommandBuffer(commandBuffers_[i]), "vkEndCommandBuffer");
-}
+        // 5. Dynamic GLB Mesh Rendering
+        if (hasGlbModel_ && glbVertexBuffer_ != VK_NULL_HANDLE) {
+            vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &glbVertexBuffer_, &offset);
+            vkCmdBindIndexBuffer(commandBuffers_[i], glbIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+
+            Mat4 model = translate(0.0f, 0.0f, -8.0f);
+            push.model = model;
+            push.mvp = multiply(viewProj, model);
+
+            for (const auto& r : glbRanges_) {
+                std::copy(r.baseColor, r.baseColor + 4, push.baseColor);
+                push.material[0] = r.metallic;
+                push.material[1] = r.roughness;
+                push.material[2] = 1.0f;
+                push.material[3] = 0.0f;
+
+                vkCmdPushConstants(
+                    commandBuffers_[i],
+                    pipelineLayout_,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(MeshPushConstants),
+                    &push
+                );
+                vkCmdDrawIndexed(commandBuffers_[i], r.indexCount, 1, r.firstIndex, 0, 0);
+            }
+        }
+
+        vkCmdEndRenderPass(commandBuffers_[i]);
+        check(vkEndCommandBuffer(commandBuffers_[i]), "vkEndCommandBuffer");
+    }
 
     void renderLoop() {
         auto lastTime = std::chrono::steady_clock::now();
@@ -1187,7 +1194,7 @@ private:
             auto now = std::chrono::steady_clock::now();
             float dt = std::chrono::duration<float>(now - lastTime).count();
             lastTime = now;
-            dt = std::clamp(dt, 0.001f, 0.05f); // Frame Delta Clamping
+            dt = std::clamp(dt, 0.001f, 0.05f);
 
             std::lock_guard<std::mutex> gpuLock(gpuMutex_);
             check(vkWaitForFences(device_, 1, &fences_[frame_], VK_TRUE, UINT64_MAX), "fence wait");
@@ -1201,7 +1208,8 @@ private:
             record(imageIndex, dt);
 
             VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            VkSubmitInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             si.waitSemaphoreCount = 1;
             si.pWaitSemaphores = &imageAvailable_[frame_];
             si.pWaitDstStageMask = &wait;
@@ -1212,7 +1220,8 @@ private:
 
             check(vkQueueSubmit(graphicsQueue_, 1, &si, fences_[frame_]), "queue submit");
 
-            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            VkPresentInfoKHR pi{};
+            pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
             pi.waitSemaphoreCount = 1;
             pi.pWaitSemaphores = &renderFinished_[frame_];
             pi.swapchainCount = 1;
@@ -1302,7 +1311,7 @@ static VulkanRenderer* gRenderer = nullptr;
 } // namespace neo3d
 
 // -----------------------------------------------------------------------------
-// JNI Method Bindings (Synchronized with MainActivity.kt)
+// JNI Method Bindings
 // -----------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStart(JNIEnv* env, jobject, jobject surface) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
