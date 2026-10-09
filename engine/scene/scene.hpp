@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace neo3d {
 using EntityId = std::uint64_t;
