@@ -43,7 +43,7 @@ jobs:
         run: gradle --no-daemon assembleDebug
 
       - name: Run tests
-        run: gradle --no-daemon test
+        run: gradle --no-daemon testDebugUnitTest
 
       - name: Upload debug APK
         if: success()
