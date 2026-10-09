@@ -842,6 +842,7 @@ private:
 
         VkPushConstantRange range{};
         range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        range.offset = 0
         range.size = sizeof(MeshPushConstants);
 
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
