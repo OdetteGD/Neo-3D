@@ -1,25 +1,39 @@
-# Neo-3D
+# Neo-3D — Android Vulkan 3D Engine Foundation
 
-Android-native C++ Vulkan engine project.
+Neo-3D is an Android-native C++20 Vulkan renderer project with an interactive touch viewport.
 
-## Build requirements
+## Implemented source
 
-- JDK 17
-- Gradle 8.9
-- Android SDK platform 35
-- Android NDK 27.2.12479018
-- CMake 3.22.1
+- Android SurfaceView + JNI lifecycle integration.
+- Native Vulkan instance, physical-device selection, Android presentation surface, swapchain, image views, graphics render pass, depth attachment, framebuffers, command buffers, fences and semaphores.
+- Actual indexed 3D mesh draw calls: a 24-vertex / 36-index cube mesh, animated multi-object scene, vertex/index buffers and depth testing.
+- GLSL vertex and fragment shaders compiled to SPIR-V during the Android native build and embedded into the shared library.
+- Metallic-roughness GGX-style direct-light shading with Fresnel and tone mapping.
+- Touch drag orbit, auto-rotation toggle and reset-view controls.
+- Scene/entity/transform/material data structures, a GLB v2 container reader, and CPU screen-tile light assignment code.
 
-Build with `gradle assembleDebug`; run tests with `gradle test`. GitHub Actions installs the Android native toolchain, builds a debug APK, runs tests, and uploads the APK artifact.
+## Build
 
-## Source destinations
+Requirements: JDK 17, Gradle 8.9, Android SDK platform 35, Android NDK 27.2.12479018, CMake 3.22.1, and glslangValidator (glslang-tools on Ubuntu).
 
-- `app/src/main/java/com/neo3d/engine/`: Android lifecycle, viewport surface, and JNI bridge.
-- `app/src/main/cpp/`: C++ Vulkan runtime and native build target.
-- `engine/scene/`: entity, transform, mesh, and material data structures.
-- `engine/shaders/`: GLSL forward vertex and GGX metallic-roughness fragment shaders.
-- `engine/assets/`: imported model, texture, material, and scene asset destinations.
+Run:
+```sh
+gradle --no-daemon assembleDebug
+gradle --no-daemon test
+```
 
-## Current renderer boundary
+The GitHub Actions workflow installs the native toolchain, compiles GLSL into SPIR-V, builds the debug APK, runs tests, and uploads the APK artifact.
 
-The integrated Vulkan viewport currently creates a native Vulkan surface, selects a presentation-capable GPU, creates a swapchain and render pass, records command buffers, synchronizes frames, and presents cleared swapchain images. The PBR shader files and scene data structures are source foundations and are not yet wired to GPU mesh rendering. Clustered lighting, shadows, HDR/post effects, glTF/GLB GPU upload, and a full editor remain unfinished. Treat the APK as build-verified only after the GitHub Actions run passes.
+## Code destinations
+
+- app/src/main/java/com/neo3d/engine/ — Android viewport/editor controls and JNI bridge.
+- app/src/main/cpp/native_engine.cpp — Vulkan renderer and mesh draw loop.
+- app/src/main/cpp/shaders/ — runtime mesh vertex/fragment shaders.
+- app/src/main/cpp/tools/ — shader build-time utilities.
+- engine/scene/ — scene entity, transform, mesh, and material data.
+- engine/render/ — CPU-side light tile assignment foundation.
+- engine/assets/ — GLB v2 container reader and asset import contract.
+
+## Not yet complete
+
+This is an actively developing engine foundation, not yet a production-complete mobile editor. GLB parsing is not yet connected to GPU mesh upload; the current PBR shader uses a hard-coded material/light; the CPU tile assignment is not yet connected to GPU clustered/Forward+ shading. Shadow maps, image-based lighting, texture sampling, HDR off-screen rendering/bloom, a complete material/scene inspector, scene serialization, asset import UI, and performance/device testing remain to be integrated and verified. Treat APK build status as verified only after a successful GitHub Actions run.
