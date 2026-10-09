@@ -58,7 +58,7 @@ public:
     }
     void resize(int,int){ resizeRequested_.store(true); }
     void stop(){ running_.store(false); if(thread_.joinable()) thread_.join(); cleanup(); }
-    std::string status() const { return status_; }
+    std::string status() const { return status_; }\n    void orbit(float dx,float dy) { yaw_.store(yaw_.load()+dx*0.009f); pitch_.store(std::clamp(pitch_.load()+dy*0.009f,-1.35f,1.35f)); }\n    void setAutoRotate(bool value) { autoRotate_.store(value); }\n    void resetView() { yaw_.store(0.0f); pitch_.store(-0.28f); autoRotate_.store(true); }
 private:
     ANativeWindow* window_=nullptr;
     VkInstance instance_=VK_NULL_HANDLE; VkSurfaceKHR surface_=VK_NULL_HANDLE;
@@ -77,7 +77,7 @@ private:
     uint32_t indexCount_=0;
     static constexpr size_t kFrames=2;
     std::array<VkSemaphore,kFrames> imageAvailable_{}; std::array<VkSemaphore,kFrames> renderFinished_{}; std::array<VkFence,kFrames> fences_{};
-    size_t frame_=0; std::atomic<bool> running_{false},resizeRequested_{false}; std::thread thread_;
+    size_t frame_=0; std::atomic<bool> running_{false},resizeRequested_{false},autoRotate_{true}; std::atomic<float> yaw_{0.0f},pitch_{-0.28f}; std::thread thread_;
     std::chrono::steady_clock::time_point started_{};
     std::string deviceName_="unknown GPU",status_="Vulkan renderer not initialized";
     std::mutex lifecycleMutex_;
@@ -200,7 +200,7 @@ private:
         vkCmdBeginRenderPass(commandBuffers_[i],&rp,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(commandBuffers_[i],VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
         VkDeviceSize offset=0;vkCmdBindVertexBuffers(commandBuffers_[i],0,1,&vertexBuffer_,&offset);vkCmdBindIndexBuffer(commandBuffers_[i],indexBuffer_,0,VK_INDEX_TYPE_UINT32);
         float t=std::chrono::duration<float>(std::chrono::steady_clock::now()-started_).count();
-        Mat4 model=multiply(rotateY(t*0.65f),rotateX(-0.28f));Mat4 view=translate(0,0,-4.4f);Mat4 mvp=multiply(perspective(static_cast<float>(extent_.width)/static_cast<float>(std::max(1u,extent_.height))),multiply(view,model));
+        float yaw=autoRotate_.load()?t*0.65f:yaw_.load(); Mat4 model=multiply(rotateY(yaw),rotateX(pitch_.load()));Mat4 view=translate(0,0,-4.4f);Mat4 mvp=multiply(perspective(static_cast<float>(extent_.width)/static_cast<float>(std::max(1u,extent_.height))),multiply(view,model));
         struct Push{Mat4 mvp;Mat4 model;} push{mvp,model};vkCmdPushConstants(commandBuffers_[i],pipelineLayout_,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
         vkCmdDrawIndexed(commandBuffers_[i],indexCount_,1,0,0,0);vkCmdEndRenderPass(commandBuffers_[i]);check(vkEndCommandBuffer(commandBuffers_[i]),"vkEndCommandBuffer");
     }
@@ -252,3 +252,4 @@ extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStart
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeResize(JNIEnv*,jobject,jint w,jint h){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->resize(w,h);}
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeStop(JNIEnv*,jobject){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer){neo3d::gRenderer->stop();delete neo3d::gRenderer;neo3d::gRenderer=nullptr;}}
 extern "C" JNIEXPORT jstring JNICALL Java_com_neo3d_engine_MainActivity_nativeStatus(JNIEnv* env,jobject){std::lock_guard<std::mutex> lock(neo3d::gMutex);std::string s=neo3d::gRenderer?neo3d::gRenderer->status():"Vulkan renderer stopped";return env->NewStringUTF(s.c_str());}
+\nextern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeOrbit(JNIEnv*,jobject,jfloat dx,jfloat dy){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->orbit(dx,dy);}\nextern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeSetAutoRotate(JNIEnv*,jobject,jboolean enabled){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->setAutoRotate(enabled==JNI_TRUE);}\nextern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeResetView(JNIEnv*,jobject){std::lock_guard<std::mutex> lock(neo3d::gMutex);if(neo3d::gRenderer)neo3d::gRenderer->resetView();}\n
