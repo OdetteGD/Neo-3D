@@ -25,10 +25,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeOrbit(dx: Float, dy: Float)
     private external fun nativeSetAutoRotate(enabled: Boolean)
     private external fun nativeResetView()
+
     private lateinit var status: TextView
     private lateinit var diagnostics: TextView
     private val uiHandler = Handler(Looper.getMainLooper())
     private val diagnosticLines = ArrayDeque<String>()
+
     private val diagnosticPoll = object : Runnable {
         override fun run() {
             if (surfaceReady) {
@@ -44,29 +46,77 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
         diagnosticLines.addLast("[$stamp] $message")
         while (diagnosticLines.size > 8) diagnosticLines.removeFirst()
-        if (::diagnostics.isInitialized) diagnostics.text = diagnosticLines.joinToString("\\n")
+        // Inayos mula sa "\\n" patungong "\n" para maayos ang multiline display
+        if (::diagnostics.isInitialized) diagnostics.text = diagnosticLines.joinToString("\n")
         android.util.Log.i("Neo3D-Diagnostics", message)
     }
+
     private var surfaceReady = false
     private var lastX = 0f
     private var lastY = 0f
     private var autoRotate = true
     private val importRequestCode = 3107
 
-    companion object { init { System.loadLibrary("neo3d") } }
+    companion object {
+        init {
+            System.loadLibrary("neo3d")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFF10151D.toInt()) }
-        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10, 4, 10, 4) }
-        status = TextView(this).apply { text = "NEO-3D | Vulkan 3D editor"; textSize = 12f; setTextColor(0xFFE3EAF4.toInt()); layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        )
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF10151D.toInt())
+        }
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(10, 4, 10, 4)
+        }
+
+        status = TextView(this).apply {
+            text = "NEO-3D | Vulkan 3D editor"
+            textSize = 12f
+            setTextColor(0xFFE3EAF4.toInt())
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+
         val rotate = Button(this).apply {
             text = "Auto: ON"
-            setOnClickListener { autoRotate = !autoRotate; nativeSetAutoRotate(autoRotate); text = if (autoRotate) "Auto: ON" else "Auto: OFF" }
+            setOnClickListener {
+                autoRotate = !autoRotate
+                nativeSetAutoRotate(autoRotate)
+                text = if (autoRotate) "Auto: ON" else "Auto: OFF"
+            }
         }
-        val reset = Button(this).apply { text = "Reset view"; setOnClickListener { nativeResetView(); autoRotate = true; rotate.text = "Auto: ON"; status.text = nativeStatus() } }
-        val refresh = Button(this).apply { text = "GPU"; setOnClickListener { status.text = nativeStatus() } }
+
+        val reset = Button(this).apply {
+            text = "Reset view"
+            setOnClickListener {
+                nativeResetView()
+                autoRotate = true
+                rotate.text = "Auto: ON"
+                status.text = nativeStatus()
+            }
+        }
+
+        val refresh = Button(this).apply {
+            text = "GPU"
+            setOnClickListener {
+                status.text = nativeStatus()
+            }
+        }
+
         val import = Button(this).apply {
             text = "Import GLB"
             setOnClickListener {
@@ -78,31 +128,52 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 startActivityForResult(picker, importRequestCode)
             }
         }
-        bar.addView(status); bar.addView(import); bar.addView(rotate); bar.addView(reset); bar.addView(refresh)
+
+        bar.addView(status)
+        bar.addView(import)
+        bar.addView(rotate)
+        bar.addView(reset)
+        bar.addView(refresh)
+
+        // --- FIXED: SurfaceView setup ---
         val viewport = SurfaceView(this)
-        viewport.setBackgroundColor(0xFF10151D.toInt())
+        // HUWAG maglagay ng viewport.setBackgroundColor dito para hindi matakpan ang Vulkan!
         viewport.holder.addCallback(this)
+
         viewport.setOnTouchListener { _, event ->
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { lastX = event.x; lastY = event.y; true }
+                MotionEvent.ACTION_DOWN -> {
+                    lastX = event.x
+                    lastY = event.y
+                    true
+                }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - lastX
                     val dy = event.y - lastY
-                    lastX = event.x; lastY = event.y
-                    if (surfaceReady) { nativeSetAutoRotate(false); autoRotate = false; rotate.text = "Auto: OFF"; nativeOrbit(dx, dy) }
+                    lastX = event.x
+                    lastY = event.y
+                    if (surfaceReady) {
+                        nativeSetAutoRotate(false)
+                        autoRotate = false
+                        rotate.text = "Auto: OFF"
+                        nativeOrbit(dx, dy)
+                    }
                     true
                 }
                 else -> true
             }
         }
+
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
+
         val logTitle = TextView(this).apply {
             text = "RENDER DIAGNOSTICS · latest 8 events"
             textSize = 10f
             setTextColor(0xFF78D6FF.toInt())
             setPadding(8, 4, 8, 2)
         }
+
         diagnostics = TextView(this).apply {
             text = "Waiting for Vulkan surface initialization…"
             textSize = 10f
@@ -110,13 +181,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setTextColor(0xFFE3EAF4.toInt())
             setPadding(8, 2, 8, 6)
         }
+
         val logScroll = ScrollView(this).apply {
             setBackgroundColor(0xFF171E28.toInt())
             isFillViewport = true
             addView(diagnostics)
         }
+
         root.addView(logTitle, LinearLayout.LayoutParams(-1, -2))
         root.addView(logScroll, LinearLayout.LayoutParams(-1, 104))
+
         setContentView(root)
         addDiagnostic("UI started; awaiting Vulkan SurfaceView")
         uiHandler.post(diagnosticPoll)
@@ -140,6 +214,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 }
                 output.toByteArray()
             } ?: throw IllegalStateException("Unable to open selected file")
+
             if (!surfaceReady) throw IllegalStateException("Wait for the 3D viewport to start before importing")
             status.text = nativeLoadGlb(bytes)
         } catch (e: Exception) {
@@ -147,8 +222,31 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) { addDiagnostic("Surface created; starting native Vulkan renderer"); nativeStart(holder.surface); surfaceReady = true; status.text = nativeStatus(); addDiagnostic(status.text.toString()) }
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { if (surfaceReady) { addDiagnostic("Surface changed: ${width}x${height}"); nativeResize(width, height) } }
-    override fun surfaceDestroyed(holder: SurfaceHolder) { addDiagnostic("Surface destroyed; stopping Vulkan renderer"); surfaceReady = false; nativeStop() }
-    override fun onDestroy() { uiHandler.removeCallbacks(diagnosticPoll); if (surfaceReady) nativeStop(); surfaceReady = false; super.onDestroy() }
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        addDiagnostic("Surface created; starting native Vulkan renderer")
+        nativeStart(holder.surface)
+        surfaceReady = true
+        status.text = nativeStatus()
+        addDiagnostic(status.text.toString())
+    }
+
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (surfaceReady) {
+            addDiagnostic("Surface changed: ${width}x${height}")
+            nativeResize(width, height)
+        }
+    }
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        addDiagnostic("Surface destroyed; stopping Vulkan renderer")
+        surfaceReady = false
+        nativeStop()
+    }
+
+    override fun onDestroy() {
+        uiHandler.removeCallbacks(diagnosticPoll)
+        if (surfaceReady) nativeStop()
+        surfaceReady = false
+        super.onDestroy()
+    }
 }
