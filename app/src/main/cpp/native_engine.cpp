@@ -220,9 +220,15 @@ private:
         vkCmdEndRenderPass(commandBuffers_[i]);check(vkEndCommandBuffer(commandBuffers_[i]),"vkEndCommandBuffer");
     }
     void renderLoop(){
+        try {
+        LOGI("Vulkan render loop started");
         while(running_.load()){
             if(resizeRequested_.exchange(false)){std::lock_guard<std::mutex> lock(lifecycleMutex_);rebuild();}
-            if(!swapchain_||!device_||!pipeline_)break;
+            if(!swapchain_||!device_||!pipeline_) {
+                status_="Vulkan renderer stopped: swapchain, device, or graphics pipeline is unavailable";
+                LOGE("%s",status_.c_str());
+                break;
+            }
             check(vkWaitForFences(device_,1,&fences_[frame_],VK_TRUE,UINT64_MAX),"vkWaitForFences");
             uint32_t imageIndex=0;VkResult ac=vkAcquireNextImageKHR(device_,swapchain_,UINT64_MAX,imageAvailable_[frame_],VK_NULL_HANDLE,&imageIndex);
             if(ac==VK_ERROR_OUT_OF_DATE_KHR){resizeRequested_.store(true);continue;}if(ac!=VK_SUCCESS&&ac!=VK_SUBOPTIMAL_KHR){LOGE("vkAcquireNextImageKHR=%d",ac);break;}
