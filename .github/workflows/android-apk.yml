@@ -57,7 +57,7 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
           sudo apt-get update
-          sudo apt-get install -y glslang-tools
+          sudo apt-get install -y glslang-tools spirv-tools vulkan-tools
       - name: Verify project configuration
         shell: bash
         run: |
@@ -67,6 +67,9 @@ jobs:
           test -f app/build.gradle.kts
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/cpp/native_engine.cpp
+          command -v glslangValidator
+          command -v spirv-val
+          command -v vulkaninfo
       - name: Build Android debug APK
         run: gradle --no-daemon --stacktrace assembleDebug
       - name: Run unit tests
