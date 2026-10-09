@@ -65,10 +65,10 @@ static Mat4 multiply(const Mat4& a, const Mat4& b) {
 
 static Mat4 perspective(float aspect) {
     const float f = 1.0f / std::tan(0.78539816339f * 0.5f);
-    const float nearP = 0.1f, farP = 100.0f;
+    const float nearP = 0.1f, farP = 150.0f;
     Mat4 m{};
     m.v[0] = f / std::max(aspect, 0.01f);
-    m.v[5] = -f; // Invert Y for Vulkan NDC
+    m.v[5] = -f; // Vulkan inverted Y
     m.v[10] = farP / (nearP - farP);
     m.v[11] = -1.0f;
     m.v[14] = (farP * nearP) / (nearP - farP);
@@ -94,6 +94,33 @@ static Mat4 rotateX(float a) {
     float c = std::cos(a), s = std::sin(a);
     m.v[5] = c; m.v[6] = s;
     m.v[9] = -s; m.v[10] = c;
+    return m;
+}
+
+// True 3D LookAt View Matrix (Standard in Unity, Godot, Unreal Engine)
+static Mat4 lookAt(float eyeX, float eyeY, float eyeZ, float targetX, float targetY, float targetZ, float upX, float upY, float upZ) {
+    float fx = targetX - eyeX, fy = targetY - eyeY, fz = targetZ - eyeZ;
+    float rlf = 1.0f / std::sqrt(fx*fx + fy*fy + fz*fz);
+    fx *= rlf; fy *= rlf; fz *= rlf;
+
+    float sx = fy * upZ - fz * upY;
+    float sy = fz * upX - fx * upZ;
+    float sz = fx * upY - fy * upX;
+    float rls = 1.0f / std::sqrt(sx*sx + sy*sy + sz*sz);
+    sx *= rls; sy *= rls; sz *= rls;
+
+    float ux = sy * fz - sz * fy;
+    float uy = sz * fx - sx * fz;
+    float uz = sx * fy - sy * fx;
+
+    Mat4 m = identity();
+    m.v[0] = sx;  m.v[1] = ux;  m.v[2] = -fx; m.v[3] = 0.0f;
+    m.v[4] = sy;  m.v[5] = uy;  m.v[6] = -fy; m.v[7] = 0.0f;
+    m.v[8] = sz;  m.v[9] = uz;  m.v[10] = -fz; m.v[11] = 0.0f;
+    m.v[12] = -(sx * eyeX + sy * eyeY + sz * eyeZ);
+    m.v[13] = -(ux * eyeX + uy * eyeY + uz * eyeZ);
+    m.v[14] =  (fx * eyeX + fy * eyeY + fz * eyeZ);
+    m.v[15] = 1.0f;
     return m;
 }
 
@@ -161,27 +188,45 @@ public:
     std::string status() const { return status_; }
 
     void orbit(float dx, float dy) {
-        yaw_.store(yaw_.load() + dx * 0.009f);
-        pitch_.store(std::clamp(pitch_.load() + dy * 0.009f, -1.35f, 1.35f));
+        yaw_.store(yaw_.load() + dx * 0.0075f);
+        pitch_.store(std::clamp(pitch_.load() + dy * 0.0075f, -1.45f, 1.45f));
     }
 
     void setAutoRotate(bool value) { autoRotate_.store(value); }
 
     void zoom(float delta) {
-        cameraDistance_.store(std::clamp(cameraDistance_.load() + delta, 1.5f, 30.0f));
+        float fwdX = std::sin(yaw_.load()) * std::cos(pitch_.load());
+        float fwdY = -std::sin(pitch_.load());
+        float fwdZ = -std::cos(yaw_.load()) * std::cos(pitch_.load());
+        camPosX_.store(camPosX_.load() + fwdX * delta);
+        camPosY_.store(camPosY_.load() + fwdY * delta);
+        camPosZ_.store(camPosZ_.load() + fwdZ * delta);
     }
 
+    // Actual 3D Camera Movement relative to viewing direction (Godot / Unity style)
     void moveCamera(float forward, float right) {
-        cameraForward_.store(std::clamp(cameraForward_.load() + forward * 0.12f, -20.0f, 20.0f));
-        cameraRight_.store(std::clamp(cameraRight_.load() + right * 0.12f, -20.0f, 20.0f));
+        float y = yaw_.load();
+        float fwdX = std::sin(y);
+        float fwdZ = -std::cos(y);
+
+        float rightX = std::cos(y);
+        float rightZ = std::sin(y);
+
+        float speed = 0.35f;
+        camPosX_.store(camPosX_.load() + (fwdX * forward + rightX * right) * speed);
+        camPosZ_.store(camPosZ_.load() + (fwdZ * forward + rightZ * right) * speed);
+    }
+
+    void elevateCamera(float up) {
+        camPosY_.store(camPosY_.load() + up * 0.35f);
     }
 
     void resetView() {
         yaw_.store(0.0f);
-        pitch_.store(-0.28f);
-        cameraDistance_.store(5.0f);
-        cameraForward_.store(0.0f);
-        cameraRight_.store(0.0f);
+        pitch_.store(-0.25f);
+        camPosX_.store(0.0f);
+        camPosY_.store(1.2f);
+        camPosZ_.store(5.5f);
         autoRotate_.store(true);
     }
 
@@ -310,26 +355,28 @@ private:
     std::atomic<bool> running_{false}, resizeRequested_{false}, autoRotate_{true};
     std::mutex gpuMutex_;
     bool importedModel_ = false;
-    std::atomic<float> yaw_{0.0f}, pitch_{-0.28f};
-    std::atomic<float> cameraDistance_{5.0f}, cameraForward_{0.0f}, cameraRight_{0.0f};
+
+    // Actual 3D Camera Variables (Unity/UE4 Transform)
+    std::atomic<float> yaw_{0.0f}, pitch_{-0.25f};
+    std::atomic<float> camPosX_{0.0f}, camPosY_{1.2f}, camPosZ_{5.5f};
+
     std::thread thread_;
     std::chrono::steady_clock::time_point started_{};
     std::string deviceName_ = "unknown GPU", status_ = "Vulkan renderer not initialized";
     std::mutex lifecycleMutex_;
 
-    // Exact Push Constant Structures (256-byte aligned)
     struct MeshPushConstants {
-        Mat4 mvp;           // 64 bytes
-        Mat4 model;         // 64 bytes
-        float baseColor[4]; // 16 bytes
-        float material[4];  // 16 bytes: x=metallic, y=roughness, z=ao, w=extra
-        float cameraPos[4]; // 16 bytes: xyz=pos, w=time
-        float sunDir[4];    // 16 bytes: xyz=dir, w=intensity
+        Mat4 mvp;
+        Mat4 model;
+        float baseColor[4];
+        float material[4];
+        float cameraPos[4];
+        float sunDir[4];
     };
 
     struct SkyPushConstants {
-        Mat4 invViewProj;   // 64 bytes
-        float sunDir[4];    // 16 bytes
+        Mat4 invViewProj;
+        float sunDir[4];
     };
 
     void initialize() {
@@ -364,7 +411,7 @@ private:
         createSkyPipeline();
         createSync();
 
-        status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | Cook-Torrance GGX PBR + ACES Tone Mapping";
+        status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | 3D Camera System + UE4 Physical Atmosphere";
         LOGI("%s", status_.c_str());
     }
 
@@ -584,7 +631,7 @@ private:
         a[0].format = format_;
         a[0].samples = VK_SAMPLE_COUNT_1_BIT;
         a[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Essential for Mali TBDR!
+        a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         a[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         a[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -910,23 +957,29 @@ private:
         vkCmdBeginRenderPass(commandBuffers_[i], &rp, VK_SUBPASS_CONTENTS_INLINE);
 
         float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
-        float yaw = autoRotate_.load() ? t * 0.45f : yaw_.load();
+
+        // 1. TRUE 3D CAMERA TRANSFORM (Unity / UE4 / Godot Standard)
+        // Camera position is absolute; Auto-rotate NEVER touches the Camera!
+        float eyeX = camPosX_.load();
+        float eyeY = camPosY_.load();
+        float eyeZ = camPosZ_.load();
+
+        float yaw = yaw_.load();
         float pitch = pitch_.load();
-        float dist = cameraDistance_.load();
 
-        // 1. Precise 3D Camera Orbit Position (World Space)
-        float camX = dist * std::sin(yaw) * std::cos(pitch) + cameraRight_.load();
-        float camY = -dist * std::sin(pitch) + cameraForward_.load();
-        float camZ = dist * std::cos(yaw) * std::cos(pitch);
+        // Target look direction vector
+        float targetX = eyeX + std::sin(yaw) * std::cos(pitch);
+        float targetY = eyeY - std::sin(pitch);
+        float targetZ = eyeZ - std::cos(yaw) * std::cos(pitch);
 
-        Mat4 view = multiply(rotateX(-pitch), multiply(rotateY(-yaw), translate(-cameraRight_.load(), -cameraForward_.load(), -dist)));
+        Mat4 view = lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
         Mat4 projection = perspective(static_cast<float>(extent_.width) / static_cast<float>(std::max(1u, extent_.height)));
         Mat4 viewProj = multiply(projection, view);
 
-        // Sun Direction & Intensity
-        float sunDir[4] = {-0.55f, 0.85f, 0.45f, 3.4f};
+        // Sun Direction & Animation Time
+        float sunDir[4] = {-0.55f, 0.85f, 0.45f, t};
 
-        // 2. Draw 3D Atmospheric Sky Dome (Rotates accurately with camera!)
+        // 2. TRUE 3D SPHERICAL SKY (Rotates in 3D as camera rotates)
         if (skyPipeline_ != VK_NULL_HANDLE) {
             SkyPushConstants skyPush{};
             skyPush.invViewProj = inverseMat4(viewProj);
@@ -937,21 +990,24 @@ private:
             vkCmdDraw(commandBuffers_[i], 3, 1, 0, 0);
         }
 
-        // 3. Draw 3D Geometry with Cook-Torrance GGX PBR Shading
+        // 3. 3D MODELS (AUTO-ROTATE ONLY ROTATES THE MODEL, NOT THE CAMERA!)
         vkCmdBindPipeline(commandBuffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(commandBuffers_[i], 0, 1, &vertexBuffer_, &offset);
         vkCmdBindIndexBuffer(commandBuffers_[i], indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
         MeshPushConstants push{};
-        push.cameraPos[0] = camX;
-        push.cameraPos[1] = camY;
-        push.cameraPos[2] = camZ;
+        push.cameraPos[0] = eyeX;
+        push.cameraPos[1] = eyeY;
+        push.cameraPos[2] = eyeZ;
         push.cameraPos[3] = t;
         std::copy(sunDir, sunDir + 4, push.sunDir);
 
+        // Model Auto-Rotation Angle
+        float modelRotAngle = autoRotate_.load() ? t * 0.75f : 0.0f;
+
         if (importedModel_) {
-            Mat4 model = identity();
+            Mat4 model = rotateY(modelRotAngle);
             push.model = model;
             push.mvp = multiply(viewProj, model);
 
@@ -959,27 +1015,27 @@ private:
                 std::copy(range.baseColor, range.baseColor + 4, push.baseColor);
                 push.material[0] = range.metallic;
                 push.material[1] = range.roughness;
-                push.material[2] = 1.0f; // AO
+                push.material[2] = 1.0f;
                 push.material[3] = 0.0f;
 
                 vkCmdPushConstants(commandBuffers_[i], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MeshPushConstants), &push);
                 vkCmdDrawIndexed(commandBuffers_[i], range.indexCount, 1, range.firstIndex, 0, 0);
             }
         } else {
-            const float positions[3] = {-1.55f, 0.0f, 1.55f};
+            const float positions[3] = {-1.65f, 0.0f, 1.65f};
             for (int object = 0; object < 3; ++object) {
-                Mat4 local = multiply(rotateY(yaw + (object - 1) * 0.45f), rotateX(pitch + (object - 1) * 0.12f));
-                Mat4 model = multiply(translate(positions[object], object == 1 ? 0.0f : -0.12f, 0.0f), local);
+                // Objects rotate independently; camera stays completely static!
+                Mat4 local = rotateY(modelRotAngle + (object - 1) * 0.45f);
+                Mat4 model = multiply(translate(positions[object], object == 1 ? 0.0f : -0.1f, 0.0f), local);
                 push.model = model;
                 push.mvp = multiply(viewProj, model);
 
-                // Material properties: Gold, Chrome, and Rough Matte
                 if (object == 0) {
-                    push.baseColor[0] = 1.00f; push.baseColor[1] = 0.76f; push.baseColor[2] = 0.33f; push.baseColor[3] = 1.0f; // Gold
-                    push.material[0] = 0.95f; push.material[1] = 0.15f; push.material[2] = 1.0f; push.material[3] = 0.0f;
+                    push.baseColor[0] = 1.00f; push.baseColor[1] = 0.78f; push.baseColor[2] = 0.32f; push.baseColor[3] = 1.0f; // Gold
+                    push.material[0] = 0.95f; push.material[1] = 0.12f; push.material[2] = 1.0f; push.material[3] = 0.0f;
                 } else if (object == 1) {
-                    push.baseColor[0] = 0.95f; push.baseColor[1] = 0.95f; push.baseColor[2] = 0.98f; push.baseColor[3] = 1.0f; // Silver
-                    push.material[0] = 0.98f; push.material[1] = 0.08f; push.material[2] = 1.0f; push.material[3] = 0.0f;
+                    push.baseColor[0] = 0.95f; push.baseColor[1] = 0.95f; push.baseColor[2] = 0.98f; push.baseColor[3] = 1.0f; // Chrome/Silver
+                    push.material[0] = 0.98f; push.material[1] = 0.05f; push.material[2] = 1.0f; push.material[3] = 0.0f;
                 } else {
                     push.baseColor[0] = 0.18f; push.baseColor[1] = 0.52f; push.baseColor[2] = 0.88f; push.baseColor[3] = 1.0f; // Matte Blue
                     push.material[0] = 0.05f; push.material[1] = 0.45f; push.material[2] = 1.0f; push.material[3] = 0.0f;
@@ -1089,7 +1145,7 @@ private:
             createCommands();
             createGraphicsPipeline();
             createSkyPipeline();
-            status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | Cook-Torrance GGX PBR + ACES Tone Mapping";
+            status_ = "Vulkan 3D | " + deviceName_ + " | " + std::to_string(extent_.width) + "x" + std::to_string(extent_.height) + " | 3D Camera System + UE4 Physical Atmosphere";
         } catch (const std::exception& e) {
             status_ = std::string("Swapchain rebuild failed: ") + e.what();
             LOGE("%s", status_.c_str());
@@ -1215,9 +1271,15 @@ extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeZoom(
     if (neo3d::gRenderer) neo3d::gRenderer->zoom(delta);
 }
 
+// 3D Directional Movement: Up/Forward, Down/Backward, Left, Right
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeMoveCamera(JNIEnv*, jobject, jfloat forward, jfloat right) {
     std::lock_guard<std::mutex> lock(neo3d::gMutex);
     if (neo3d::gRenderer) neo3d::gRenderer->moveCamera(forward, right);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeElevateCamera(JNIEnv*, jobject, jfloat up) {
+    std::lock_guard<std::mutex> lock(neo3d::gMutex);
+    if (neo3d::gRenderer) neo3d::gRenderer->elevateCamera(up);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_neo3d_engine_MainActivity_nativeSetAutoRotate(JNIEnv*, jobject, jboolean enabled) {
