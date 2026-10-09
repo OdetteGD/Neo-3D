@@ -2,6 +2,7 @@
 
 layout(location=0) in vec3 normalWorld;
 layout(location=1) in vec3 positionWorld;
+layout(push_constant) uniform DrawConstants { mat4 mvp; mat4 model; vec4 baseColor; vec4 material; } drawData;
 layout(location=0) out vec4 outColor;
 
 const float PI = 3.14159265359;
@@ -66,15 +67,18 @@ vec3 toneMapACES(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+vec3 srgbToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
 void main() {
     vec3 N = normalize(normalWorld);
     vec3 V = normalize(vec3(0.0, 0.0, 5.0) - positionWorld);
 
-    // Default viewport material until glTF material and texture descriptors
-    // are wired into the draw pipeline. All values are linear-space.
-    vec3 albedo = vec3(0.16, 0.58, 0.92);
-    float metallic = 0.18;
-    float roughness = clamp(0.32, MIN_ROUGHNESS, 1.0);
+    // glTF baseColorFactor is specified in sRGB space; lighting is linear.
+    vec3 albedo = srgbToLinear(clamp(drawData.baseColor.rgb, 0.0, 1.0));
+    float metallic = clamp(drawData.material.x, 0.0, 1.0);
+    float roughness = clamp(drawData.material.y, MIN_ROUGHNESS, 1.0);
 
     vec3 color = vec3(0.0);
     color += evaluateDirectLight(N, V, normalize(vec3(-0.55, 0.85, 0.65)),
