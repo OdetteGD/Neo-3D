@@ -94,7 +94,7 @@ private:
         VkAndroidSurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};si.window=window_;
         check(vkCreateAndroidSurfaceKHR(instance_,&si,nullptr,&surface_),"vkCreateAndroidSurfaceKHR");
         selectDevice();createDevice();createGeometry();createSwapchain();chooseDepthFormat();createRenderPass();createDepthResources();createFramebuffers();createCommands();createGraphicsPipeline();createSync();
-        status_="Vulkan 3D | "+deviceName_+" | "+std::to_string(extent_.width)+"x"+std::to_string(extent_.height)+" | indexed cube + depth + GGX PBR";
+        status_="Vulkan 3D | "+deviceName_+" | "+std::to_string(extent_.width)+"x"+std::to_string(extent_.height)+" | Vulkan geometry + depth + GGX PBR + blue-sky clear";
         LOGI("%s",status_.c_str());
     }
     void selectDevice(){
@@ -182,7 +182,7 @@ private:
             VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};vi.vertexBindingDescriptionCount=1;vi.pVertexBindingDescriptions=&binding;vi.vertexAttributeDescriptionCount=static_cast<uint32_t>(attrs.size());vi.pVertexAttributeDescriptions=attrs.data();
             VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
             VkViewport vp{0,0,static_cast<float>(extent_.width),static_cast<float>(extent_.height),0,1};VkRect2D sc{{0,0},extent_};VkPipelineViewportStateCreateInfo vsi{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};vsi.viewportCount=1;vsi.pViewports=&vp;vsi.scissorCount=1;vsi.pScissors=&sc;
-            VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};rs.polygonMode=VK_POLYGON_MODE_FILL;rs.cullMode=VK_CULL_MODE_BACK_BIT;rs.frontFace=VK_FRONT_FACE_CLOCKWISE;rs.lineWidth=1.0f;
+            VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};rs.polygonMode=VK_POLYGON_MODE_FILL;rs.cullMode=VK_CULL_MODE_NONE;rs.frontFace=VK_FRONT_FACE_CLOCKWISE;rs.lineWidth=1.0f;
             VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
             VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};ds.depthTestEnable=VK_TRUE;ds.depthWriteEnable=VK_TRUE;ds.depthCompareOp=VK_COMPARE_OP_LESS;ds.minDepthBounds=0;ds.maxDepthBounds=1;
             VkPipelineColorBlendAttachmentState ba{};ba.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
@@ -199,7 +199,7 @@ private:
     void createSync(){VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fi.flags=VK_FENCE_CREATE_SIGNALED_BIT;for(size_t i=0;i<kFrames;++i){check(vkCreateSemaphore(device_,&si,nullptr,&imageAvailable_[i]),"vkCreateSemaphore");check(vkCreateSemaphore(device_,&si,nullptr,&renderFinished_[i]),"vkCreateSemaphore");check(vkCreateFence(device_,&fi,nullptr,&fences_[i]),"vkCreateFence");}}
     void record(uint32_t i){
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};check(vkBeginCommandBuffer(commandBuffers_[i],&bi),"vkBeginCommandBuffer");
-        VkClearValue clears[2]{};clears[0].color={{0.025f,0.045f,0.075f,1.0f}};clears[1].depthStencil={1.0f,0};
+        VkClearValue clears[2]{};clears[0].color={{0.16f,0.48f,0.78f,1.0f}};clears[1].depthStencil={1.0f,0};
         VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};rp.renderPass=renderPass_;rp.framebuffer=framebuffers_[i];rp.renderArea={{0,0},extent_};rp.clearValueCount=2;rp.pClearValues=clears;
         vkCmdBeginRenderPass(commandBuffers_[i],&rp,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(commandBuffers_[i],VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
         VkDeviceSize offset=0;vkCmdBindVertexBuffers(commandBuffers_[i],0,1,&vertexBuffer_,&offset);vkCmdBindIndexBuffer(commandBuffers_[i],indexBuffer_,0,VK_INDEX_TYPE_UINT32);
