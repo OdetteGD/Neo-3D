@@ -236,7 +236,16 @@ private:
             VkPipelineStageFlags wait=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.waitSemaphoreCount=1;si.pWaitSemaphores=&imageAvailable_[frame_];si.pWaitDstStageMask=&wait;si.commandBufferCount=1;si.pCommandBuffers=&commandBuffers_[imageIndex];si.signalSemaphoreCount=1;si.pSignalSemaphores=&renderFinished_[frame_];
             VkResult sub=vkQueueSubmit(graphicsQueue_,1,&si,fences_[frame_]);if(sub!=VK_SUCCESS){LOGE("vkQueueSubmit=%d",sub);break;}
             VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};pi.waitSemaphoreCount=1;pi.pWaitSemaphores=&renderFinished_[frame_];pi.swapchainCount=1;pi.pSwapchains=&swapchain_;pi.pImageIndices=&imageIndex;VkResult pr=vkQueuePresentKHR(presentQueue_,&pi);
-            if(pr==VK_ERROR_OUT_OF_DATE_KHR||pr==VK_SUBOPTIMAL_KHR||ac==VK_SUBOPTIMAL_KHR)resizeRequested_.store(true);else if(pr!=VK_SUCCESS){LOGE("vkQueuePresentKHR=%d",pr);break;}frame_=(frame_+1)%kFrames;
+            if(pr==VK_ERROR_OUT_OF_DATE_KHR||pr==VK_SUBOPTIMAL_KHR||ac==VK_SUBOPTIMAL_KHR)resizeRequested_.store(true);else if(pr!=VK_SUCCESS){LOGE("vkQueuePresentKHR=%d",pr);status_="Vulkan presentation failed: "+std::to_string(static_cast<int>(pr));break;}frame_=(frame_+1)%kFrames;
+        }
+        } catch(const std::exception& e) {
+            status_=std::string("Vulkan render-loop failure: ")+e.what();
+            LOGE("%s",status_.c_str());
+            running_.store(false);
+        } catch(...) {
+            status_="Vulkan render-loop failure: unknown native exception";
+            LOGE("%s",status_.c_str());
+            running_.store(false);
         }
     }
     void rebuild(){
