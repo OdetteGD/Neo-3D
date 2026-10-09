@@ -18,7 +18,7 @@ inline GlbDocument readGlb(const std::vector<std::uint8_t>& bytes) {
     if (readU32(bytes.data()+4)!=2u) throw std::runtime_error("Only GLB version 2 is supported");
     const std::uint32_t declared=readU32(bytes.data()+8);
     if (declared!=bytes.size()) throw std::runtime_error("GLB declared length does not match input size");
-    std::size_t cursor=12; GlbDocument doc; bool sawJson=false;
+    std::size_t cursor=12; GlbDocument doc; bool sawJson=false, sawBin=false;
     while (cursor<bytes.size()) {
         if (bytes.size()-cursor<8) throw std::runtime_error("GLB chunk header is truncated");
         const std::uint32_t length=readU32(bytes.data()+cursor), type=readU32(bytes.data()+cursor+4); cursor+=8;
@@ -28,7 +28,10 @@ inline GlbDocument readGlb(const std::vector<std::uint8_t>& bytes) {
             if (sawJson || cursor!=20) throw std::runtime_error("GLB JSON chunk must be the first and only JSON chunk");
             doc.json=std::string_view(reinterpret_cast<const char*>(chunk),length); sawJson=true;
         } else if (type==binChunk) {
-            if (!sawJson || !doc.binary.empty()) throw std::runtime_error("GLB BIN chunk must follow JSON and appear at most once");
+            // Track presence independently of payload size: a zero-length BIN chunk
+            // is still a chunk and must not permit a second BIN chunk.
+            if (!sawJson || sawBin) throw std::runtime_error("GLB BIN chunk must follow JSON and appear at most once");
+            sawBin=true;
             doc.binary.assign(chunk,chunk+length);
         }
         cursor+=length;
