@@ -3,6 +3,9 @@
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <vulkan/vulkan.h>
+#include "scene/scene.hpp"
+#include "render/forward_plus.hpp"
+#include "assets/glb_reader.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
