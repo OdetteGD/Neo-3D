@@ -10,3 +10,5 @@ find_library(android-lib android REQUIRED)
 find_library(log-lib log REQUIRED)
 find_library(vulkan-lib vulkan REQUIRED)
 target_link_libraries(neo3d PRIVATE ${android-lib} ${log-lib} ${vulkan-lib})
+
+target_include_directories(neo3d PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../../engine)
