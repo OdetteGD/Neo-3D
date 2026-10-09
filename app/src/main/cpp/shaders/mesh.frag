@@ -2,22 +2,21 @@
 
 layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec3 vPositionWorld;
-layout(location = 2) in vec3 vCameraPos;
-layout(location = 3) in vec3 vSunDir;
-layout(location = 4) in float vSunIntensity;
+layout(location = 2) in vec4 vColor;
 
-layout(push_constant) uniform DrawConstants {
+layout(push_constant) uniform PushConstants {
     mat4 mvp;
     mat4 model;
     vec4 baseColor;
-    vec4 material;
-    vec4 cameraPos;
-    vec4 sunDir;
-} drawData;
+    vec4 material;     // x: metallic, y: roughness, z: ao, w: unused
+    vec4 cameraPos;    // xyz: camPos, w: time
+    vec4 sunDir;       // xyz: sunDir, w: exposure
+    vec4 envParams;    // x: fogDensity, y: timeOfDay, zw: unused
+} ubo;
 
 layout(location = 0) out vec4 outColor;
 
-const float PI = 3.141592653589793;
+const float PI = 3.14159265358979323846;
 
 // GGX / Trowbridge-Reitz Normal Distribution Function
 float distributionGGX(vec3 N, vec3 H, float roughness) {
@@ -29,7 +28,7 @@ float distributionGGX(vec3 N, vec3 H, float roughness) {
     return a2 / max(PI * denom * denom, 1e-5);
 }
 
-// Smith Joint Masking-Shadowing Function (Heitz 2014) - More accurate for mobile
+// Smith Joint Masking-Shadowing Function (Heitz 2014)
 float geometrySmithJoint(float NdotV, float NdotL, float roughness) {
     float a = roughness * roughness;
     float gV = NdotL * sqrt(NdotV * (NdotV - a * NdotV) + a);
@@ -67,23 +66,27 @@ vec3 srgbToLinear(vec3 c) {
 
 void main() {
     vec3 N = normalize(vNormalWorld);
-    vec3 V = normalize(vCameraPos - vPositionWorld);
+    vec3 V = normalize(ubo.cameraPos.xyz - vPositionWorld);
     float NdotV = max(dot(N, V), 1e-4);
 
-    vec3 albedo = srgbToLinear(clamp(drawData.baseColor.rgb, 0.0, 1.0));
-    float metallic = clamp(drawData.material.x, 0.0, 1.0);
-    float roughness = clamp(drawData.material.y, 0.045, 1.0);
-    float ao = clamp(drawData.material.z > 0.0 ? drawData.material.z : 1.0, 0.0, 1.0);
+    vec3 albedo = srgbToLinear(clamp(vColor.rgb, 0.0, 1.0));
+    float metallic = clamp(ubo.material.x, 0.0, 1.0);
+    float roughness = clamp(ubo.material.y, 0.045, 1.0);
+    float ao = clamp(ubo.material.z > 0.0 ? ubo.material.z : 1.0, 0.0, 1.0);
 
-    // Dielectrics have ~0.04 base reflectivity, metals use albedo
+    // Dielectrics use 0.04 base reflectivity, metals use albedo
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 Lo = vec3(0.0);
 
     // 1. DIRECTIONAL SUN LIGHT
-    vec3 L = normalize(vSunDir);
+    vec3 L = normalize(ubo.sunDir.xyz);
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
+
+    // Dynamic solar intensity based on angle above horizon
+    float sunAltitude = clamp(L.y, 0.0, 1.0);
+    float sunIntensity = 4.2 * sunAltitude;
 
     if (NdotL > 0.0) {
         float D = distributionGGX(N, H, roughness);
@@ -96,12 +99,12 @@ void main() {
         vec3 diffuse = kD * albedo / PI;
         vec3 specular = D * Vis * F;
 
-        vec3 sunColor = vec3(1.0, 0.95, 0.88) * vSunIntensity;
+        vec3 sunColor = vec3(1.0, 0.95, 0.88) * sunIntensity;
         Lo += (diffuse + specular) * sunColor * NdotL;
     }
 
-    // 2. SOFT FILL SKY LIGHT (Secondary Direction)
-    vec3 Lfill = normalize(vec3(-vSunDir.x, 0.4, -vSunDir.z));
+    // 2. SECONDARY FILL LIGHT (Sky bounce)
+    vec3 Lfill = normalize(vec3(-L.x, 0.45, -L.z));
     float NdotLfill = max(dot(N, Lfill), 0.0);
     vec3 fillRadiance = vec3(0.35, 0.48, 0.65) * 0.75;
     Lo += (albedo / PI) * (1.0 - metallic) * fillRadiance * NdotLfill;
@@ -116,7 +119,6 @@ void main() {
     vec3 kDamb = (vec3(1.0) - Famb) * (1.0 - metallic);
     vec3 diffuseAmbient = kDamb * albedo * ambientEnv;
 
-    // Specular environment reflection approximation
     vec3 R = reflect(-V, N);
     float reflectionUp = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 reflectionColor = mix(groundColor, skyColor * 1.6, reflectionUp);
@@ -125,9 +127,18 @@ void main() {
     vec3 ambient = (diffuseAmbient + specularAmbient) * ao;
     vec3 finalColor = Lo + ambient;
 
-    // 4. ACES TONEMAPPING + GAMMA CORRECTION
-    finalColor = toneMapACES(finalColor);
+    // 4. VOLUMETRIC EXPONENTIAL HEIGHT FOG (Connected to Settings Slider)
+    float dist = length(ubo.cameraPos.xyz - vPositionWorld);
+    float fogDensity = ubo.envParams.x;
+    float fogHeightFactor = exp(-vPositionWorld.y * 0.12);
+    float fogFactor = 1.0 - exp(-dist * fogDensity * fogHeightFactor);
+    vec3 fogColor = vec3(0.65, 0.76, 0.90);
+    finalColor = mix(finalColor, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    // 5. EXPOSURE + ACES TONEMAPPING + GAMMA CORRECTION
+    float exposure = ubo.sunDir.w;
+    finalColor = toneMapACES(finalColor * exposure);
     finalColor = pow(max(finalColor, vec3(0.0)), vec3(1.0 / 2.2));
 
-    outColor = vec4(finalColor, drawData.baseColor.a);
+    outColor = vec4(finalColor, vColor.a);
 }
