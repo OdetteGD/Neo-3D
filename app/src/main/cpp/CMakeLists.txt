@@ -10,6 +10,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 set(VERT_SPV ${GENERATED_DIR}/mesh.vert.spv)
+set(SHADOW_VERT_SPV ${GENERATED_DIR}/shadow.vert.spv)
 set(FRAG_SPV ${GENERATED_DIR}/mesh.frag.spv)
 set(SKY_VERT_SPV ${GENERATED_DIR}/sky.vert.spv)
 set(SKY_FRAG_SPV ${GENERATED_DIR}/sky.frag.spv)
@@ -20,6 +21,13 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_DIR}
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S vert -o ${VERT_SPV} ${SHADER_DIR}/mesh.vert
     DEPENDS ${SHADER_DIR}/mesh.vert
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT ${SHADOW_VERT_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_DIR}
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S vert -o ${SHADOW_VERT_SPV} ${SHADER_DIR}/shadow.vert
+    DEPENDS ${SHADER_DIR}/shadow.vert
     VERBATIM
 )
 add_custom_command(
@@ -45,8 +53,8 @@ add_custom_command(
 )
 add_custom_command(
     OUTPUT ${SHADER_HEADER}
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py ${SHADER_HEADER} ${VERT_SPV} ${FRAG_SPV} ${SKY_VERT_SPV} ${SKY_FRAG_SPV}
-    DEPENDS ${VERT_SPV} ${FRAG_SPV} ${SKY_VERT_SPV} ${SKY_FRAG_SPV} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py ${SHADER_HEADER} ${VERT_SPV} ${FRAG_SPV} ${SKY_VERT_SPV} ${SKY_FRAG_SPV} ${SHADOW_VERT_SPV}
+    DEPENDS ${VERT_SPV} ${FRAG_SPV} ${SKY_VERT_SPV} ${SKY_FRAG_SPV} ${SHADOW_VERT_SPV} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
     VERBATIM
 )
 add_custom_target(neo3d_shaders DEPENDS ${SHADER_HEADER})
