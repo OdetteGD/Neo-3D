@@ -1468,14 +1468,18 @@ private:
         worldMeshes_.clear();
         physicsObstacles_.clear();
 
-        // 1. High-Detail Subdivided Terrain (Organic curves, hindi low-poly)
+        // 1. Dense terrain grid with smooth procedural height variation.
+        // Keep the existing terrain material and collision setup below intact.
         float terrainCol[4] = {0.35f, 0.42f, 0.28f, 1.0f};
-        worldMeshes_.push_back(createSubdividedPlane(160.0f, 96, 1.8f, 0.04f, 0.88f, terrainCol));
+        worldMeshes_.push_back(createSubdividedPlane(220.0f, 192, 1.8f, 0.04f, 0.88f, terrainCol));
 
-        // 2. High-Subdivision Water Lake Surface
-        float waterCol[4] = {0.08f, 0.45f, 0.72f, 0.95f};
-        RealisticMesh water = createSubdividedPlane(70.0f, 64, 0.0f, 0.05f, 0.02f, waterCol);
-        water.modelMatrix = translate(15.0f, 0.2f, -10.0f);
+        // 2. Wide, high-resolution ocean surface. The larger footprint prevents
+        // the small rectangular water patch/horizon edge visible on mobile.
+        // The water shader supplies animated multi-frequency normals, Fresnel
+        // reflections and sun glints; this dense grid provides a smoother base.
+        float waterCol[4] = {0.035f, 0.34f, 0.43f, 0.98f};
+        RealisticMesh water = createSubdividedPlane(520.0f, 256, 0.0f, 0.05f, 0.02f, waterCol);
+        water.modelMatrix = translate(0.0f, 0.2f, -45.0f);
         water.isWater = 1.0f;
         worldMeshes_.push_back(water);
 
