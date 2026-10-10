@@ -141,18 +141,31 @@ void main() {
     // Deep water color attenuation
     vec3 finalLinear = directLight + ambient + obj.emissive.rgb;
     if (isWater) {
-        vec3 deepWater = vec3(0.008, 0.055, 0.14);
-        vec3 shallowWater = vec3(0.035, 0.30, 0.39);
-        float shorelineTint = clamp(pow(NdotV, 1.7), 0.0, 1.0);
-        vec3 waterBody = mix(deepWater, shallowWater, shorelineTint);
-        // Schlick Fresnel: reflections increase at shallow viewing angles.
-        float waterFresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
-        vec3 reflectedSky = mix(vec3(0.20, 0.34, 0.48), vec3(0.62, 0.76, 0.92),
-                                clamp(R.y * 0.5 + 0.5, 0.0, 1.0));
-        float sunGlint = pow(max(dot(reflect(-L, N), V), 0.0), 96.0) *
-                         max(scene.sunDirection.y, 0.0) * 2.4;
-        finalLinear = mix(waterBody + directLight * 0.20, reflectedSky, waterFresnel);
-        finalLinear += scene.sunColor.rgb * sunGlint;
+        vec3 deepWater = vec3(0.004, 0.040, 0.105);
+        vec3 shallowWater = vec3(0.025, 0.27, 0.34);
+        float grazing = pow(1.0 - NdotV, 5.0);
+        float shorelineTint = clamp(pow(max(N.y, 0.0), 0.7), 0.0, 1.0);
+        vec3 waterBody = mix(deepWater, shallowWater, shorelineTint * 0.72);
+
+        // Approximate ocean microfacet reflection using sky/atmosphere colors.
+        // Roughness varies with wave slope, producing broad highlights and glints.
+        float waterFresnel = 0.02 + 0.98 * grazing;
+        float reflectedElevation = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 horizonSky = vec3(0.47, 0.70, 0.80);
+        vec3 zenithSky = vec3(0.13, 0.43, 0.72);
+        vec3 reflectedSky = mix(horizonSky, zenithSky,
+                                smoothstep(0.25, 0.95, reflectedElevation));
+        float waveSlope = clamp(length(vec2(w1, w2)), 0.0, 1.0);
+        float specPower = mix(180.0, 42.0, waveSlope * 0.55);
+        float sunAlignment = max(dot(reflect(-L, N), V), 0.0);
+        float sunGlint = pow(sunAlignment, specPower) *
+                         max(scene.sunDirection.y, 0.0) * 3.8;
+        float broadGlint = pow(sunAlignment, 18.0) *
+                           max(scene.sunDirection.y, 0.0) * 0.16;
+        vec3 waterReflection = reflectedSky * (0.72 + grazing * 0.55);
+        finalLinear = mix(waterBody + directLight * 0.24,
+                          waterReflection, clamp(waterFresnel * 0.88, 0.0, 0.98));
+        finalLinear += scene.sunColor.rgb * (sunGlint + broadGlint);
     }
 
     // Height Volumetric Fog
