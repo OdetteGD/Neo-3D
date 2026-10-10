@@ -94,9 +94,12 @@ void main() {
     // Realistic Water Gerstner Waves
     bool isWater = obj.pbrParams.w > 0.5;
     if (isWater) {
-        float w1 = sin(vPositionWorld.x * 1.2 + time * 2.5);
-        float w2 = cos(vPositionWorld.z * 1.5 + time * 2.0);
-        vec3 waveNormal = normalize(vec3(w1 * 0.07, 1.0, w2 * 0.07));
+        float phaseA = vPositionWorld.x * 0.72 + vPositionWorld.z * 0.48 + time * 1.35;
+        float phaseB = vPositionWorld.z * 1.63 - vPositionWorld.x * 0.57 + time * 2.05;
+        float phaseC = (vPositionWorld.x + vPositionWorld.z) * 3.1 - time * 2.8;
+        float w1 = sin(phaseA) * 0.55 + sin(phaseB) * 0.30 + sin(phaseC) * 0.15;
+        float w2 = cos(phaseA * 0.83) * 0.52 + cos(phaseB * 1.12) * 0.33 + cos(phaseC) * 0.15;
+        vec3 waveNormal = normalize(vec3(w1 * 0.13, 1.0, w2 * 0.13));
         mat3 TBN = mat3(vTangentWorld, vBitangentWorld, vNormalWorld);
         N = normalize(TBN * waveNormal);
     }
