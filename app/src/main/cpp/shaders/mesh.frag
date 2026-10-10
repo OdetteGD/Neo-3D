@@ -136,14 +136,21 @@ void main() {
     vec3 ambient = (albedo * scene.sunColor.w + ambientReflect * F) * ao;
 
     // Deep water color attenuation
-    if (isWater) {
-        vec3 deepWater = vec3(0.02, 0.10, 0.24);
-        vec3 shallowWater = vec3(0.06, 0.40, 0.52);
-        albedo = mix(deepWater, shallowWater, clamp(pow(NdotV, 2.0), 0.0, 1.0));
-        directLight += albedo * scene.sunColor.rgb * 0.25;
-    }
-
     vec3 finalLinear = directLight + ambient + obj.emissive.rgb;
+    if (isWater) {
+        vec3 deepWater = vec3(0.008, 0.055, 0.14);
+        vec3 shallowWater = vec3(0.035, 0.30, 0.39);
+        float shorelineTint = clamp(pow(NdotV, 1.7), 0.0, 1.0);
+        vec3 waterBody = mix(deepWater, shallowWater, shorelineTint);
+        // Schlick Fresnel: reflections increase at shallow viewing angles.
+        float waterFresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
+        vec3 reflectedSky = mix(vec3(0.20, 0.34, 0.48), vec3(0.62, 0.76, 0.92),
+                                clamp(R.y * 0.5 + 0.5, 0.0, 1.0));
+        float sunGlint = pow(max(dot(reflect(-L, N), V), 0.0), 96.0) *
+                         max(scene.sunDirection.y, 0.0) * 2.4;
+        finalLinear = mix(waterBody + directLight * 0.20, reflectedSky, waterFresnel);
+        finalLinear += scene.sunColor.rgb * sunGlint;
+    }
 
     // Height Volumetric Fog
     float dist = length(scene.cameraPosition.xyz - vPositionWorld);
