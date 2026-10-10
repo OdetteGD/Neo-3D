@@ -353,7 +353,10 @@ public:
         }
     }
 
-    void resize(int, int) { resizeRequested_.store(true); }
+    void resize(int width, int height) {
+        // Android can report transient zero-sized surfaces during lifecycle changes.
+        if (width > 0 && height > 0) resizeRequested_.store(true);
+    }
 
     void stop() {
         running_.store(false);
@@ -1090,7 +1093,7 @@ private:
         li.pPushConstantRanges = &range;
         check(vkCreatePipelineLayout(device_, &li, nullptr, &shadowPipelineLayout_), "Shadow layout");
 
-        VkShaderModule v = createShader(kMeshVert, kMeshVertSize);
+        VkShaderModule v = createShader(kShadowVert, kShadowVertSize);
 
         VkPipelineShaderStageCreateInfo stage{};
         stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1700,6 +1703,7 @@ private:
     }
 
     void renderLoop() {
+        try {
         auto lastTime = std::chrono::steady_clock::now();
         while (running_.load()) {
             if (resizeRequested_.exchange(false)) {
@@ -1718,8 +1722,10 @@ private:
             uint32_t imageIndex = 0;
             VkResult ac = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, imageAvailable_[frame_], VK_NULL_HANDLE, &imageIndex);
             if (ac == VK_ERROR_OUT_OF_DATE_KHR) { resizeRequested_.store(true); continue; }
+            if (ac == VK_SUBOPTIMAL_KHR) resizeRequested_.store(true);
+            else if (ac != VK_SUCCESS) check(ac, "vkAcquireNextImageKHR");
 
-            vkResetFences(device_, 1, &fences_[frame_]);
+            check(vkResetFences(device_, 1, &fences_[frame_]), "vkResetFences");
             vkResetCommandBuffer(commandBuffers_[imageIndex], 0);
             record(imageIndex, dt);
 
@@ -1747,9 +1753,20 @@ private:
             VkResult pr = vkQueuePresentKHR(presentQueue_, &pi);
             if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
                 resizeRequested_.store(true);
+            } else if (pr != VK_SUCCESS) {
+                check(pr, "vkQueuePresentKHR");
             }
 
             frame_ = (frame_ + 1) % kFrames;
+        }
+        } catch (const std::exception& e) {
+            running_.store(false);
+            status_ = std::string("Vulkan render loop stopped safely: ") + e.what();
+            LOGE("%s", status_.c_str());
+        } catch (...) {
+            running_.store(false);
+            status_ = "Vulkan render loop stopped safely: unknown native exception";
+            LOGE("%s", status_.c_str());
         }
     }
 
