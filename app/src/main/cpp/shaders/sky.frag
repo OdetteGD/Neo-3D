@@ -12,19 +12,20 @@ layout(push_constant) uniform SkyPush {
 
 layout(location = 0) out vec4 outColor;
 
-const float PI = 3.141592653589793;
+const float PI = 3.14159265358979323846;
 
-// Mali GPU Safe Analytical 3D Noise (Walang high-frequency black noise)
+// Mali/Adreno Mobile-Safe Hash
 float hash13(vec3 p) {
     p = fract(p * 0.1031);
     p += dot(p, p.zyx + 31.32);
     return fract((p.x + p.y) * p.z);
 }
 
+// 3D Smooth Interpolated Value Noise
 float smoothNoise(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f); // Hermite curve
+    f = f * f * (3.0 - 2.0 * f); // Hermite cubic curve
 
     return mix(
         mix(mix(hash13(i + vec3(0,0,0)), hash13(i + vec3(1,0,0)), f.x),
@@ -34,6 +35,7 @@ float smoothNoise(vec3 p) {
     );
 }
 
+// 4-Octave Fractional Brownian Motion para sa makapal at malambot na ulap
 float fbmCloud(vec3 p) {
     float v = 0.0;
     v += 0.5000 * smoothNoise(p); p = p * 2.02 + vec3(1.2, 3.4, 5.6);
@@ -43,14 +45,23 @@ float fbmCloud(vec3 p) {
     return v;
 }
 
-// Henyey-Greenstein Mie Phase (Solar halo & silver lining)
-float hgPhase(float cosTheta, float g) {
-    float g2 = g * g;
-    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 0.01), 1.5));
+// Dual-Lobe Henyey-Greenstein Phase Function (Mabilisang rayleigh forward scattering)
+float dualHenyeyGreenstein(float cosTheta) {
+    float g1 = 0.82;
+    float g2 = -0.35;
+    float w = 0.65;
+    
+    float p1 = (1.0 - g1 * g1) / (4.0 * PI * pow(max(1.0 + g1 * g1 - 2.0 * g1 * cosTheta, 0.001), 1.5));
+    float p2 = (1.0 - g2 * g2) / (4.0 * PI * pow(max(1.0 + g2 * g2 - 2.0 * g2 * cosTheta, 0.001), 1.5));
+    return mix(p2, p1, w);
 }
 
 vec3 ACESFilm(vec3 x) {
-    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
@@ -60,59 +71,61 @@ void main() {
     float time = skyData.cameraPos.w;
     float cosTheta = dot(ray, sun);
 
-    // 1. PHYSICAL ATMOSPHERIC SCATTERING
+    // 1. PHYSICAL ATMOSPHERIC SCATTERING SKY MODEL
     float h = clamp(ray.y, 0.0, 1.0);
-    float sunAltitude = clamp(sun.y, -0.2, 1.0);
+    float sunElev = sun.y;
 
-    vec3 zenithDay = vec3(0.08, 0.28, 0.68);
-    vec3 horizonDay = vec3(0.68, 0.82, 0.98);
-    vec3 sunsetColor = vec3(1.0, 0.42, 0.12);
-    vec3 nightZenith = vec3(0.005, 0.01, 0.025);
+    vec3 zenithDay = vec3(0.08, 0.32, 0.72);
+    vec3 horizonDay = vec3(0.65, 0.80, 0.96);
+    vec3 sunsetColor = vec3(1.0, 0.40, 0.10);
+    vec3 nightZenith = vec3(0.004, 0.008, 0.018);
+    vec3 nightHorizon = vec3(0.02, 0.03, 0.05);
 
-    // Day-Night-Sunset Blend
-    float dayFactor = smoothstep(-0.05, 0.25, sunAltitude);
-    float sunsetFactor = smoothstep(0.35, 0.0, abs(sunAltitude - 0.08));
+    float dayBlend = smoothstep(-0.08, 0.22, sunElev);
+    float sunsetBlend = smoothstep(0.35, 0.0, abs(sunElev - 0.06));
 
-    vec3 skyBase = mix(horizonDay, zenithDay, pow(h, 0.72));
-    skyBase = mix(skyBase, sunsetColor, sunsetFactor * (1.0 - h));
-    skyBase = mix(nightZenith, skyBase, dayFactor);
+    vec3 skyBase = mix(horizonDay, zenithDay, pow(h, 0.68));
+    skyBase = mix(skyBase, sunsetColor, sunsetBlend * (1.0 - h));
+    vec3 nightSky = mix(nightHorizon, nightZenith, pow(h, 0.68));
+    skyBase = mix(nightSky, skyBase, dayBlend);
 
-    // Direct Sun Disc & Atmospheric Flare
-    float sunDisc = smoothstep(0.9993, 0.9998, cosTheta) * 50.0;
-    float sunCorona = hgPhase(cosTheta, 0.85) * 3.5;
-    vec3 sunLight = vec3(1.0, 0.94, 0.82) * (sunDisc + sunCorona) * dayFactor;
-    vec3 sky = skyBase + sunLight;
+    // Sun Disc at Solar Corona Halo
+    float sunDisc = smoothstep(0.9994, 0.99985, cosTheta) * 60.0;
+    float sunCorona = dualHenyeyGreenstein(cosTheta) * 4.2;
+    vec3 sunLightColor = mix(vec3(1.0, 0.55, 0.2), vec3(1.0, 0.96, 0.85), clamp(sunElev * 2.0, 0.0, 1.0));
+    vec3 sunAtmosphere = sunLightColor * (sunDisc + sunCorona) * dayBlend;
+    vec3 finalSky = skyBase + sunAtmosphere;
 
-    // Ground Horizon Haze
+    // Horizon Earth Nadir blend
     if (ray.y < 0.0) {
-        vec3 groundColor = vec3(0.09, 0.08, 0.07);
-        sky = mix(sky, groundColor, clamp(-ray.y * 3.0, 0.0, 1.0));
+        vec3 groundTint = vec3(0.08, 0.07, 0.06);
+        finalSky = mix(finalSky, groundTint, clamp(-ray.y * 3.5, 0.0, 1.0));
     }
 
-    // 2. ULTRA-SMOOTH PROCEDURAL CLOUD DOME (Walang Itim na Dither Artifacts)
+    // 2. ULTRA-REALISTIC PROCEDURAL CLOUDS (Curved Stratocumulus Dome)
     if (ray.y > 0.01) {
-        float domeHeight = 1.0 / (ray.y + 0.18);
-        vec2 wind = vec2(time * 0.008, time * 0.004);
-        vec3 cloudUV = vec3(ray.xz * domeHeight * 0.45 + wind, time * 0.002);
+        float cloudAltitude = 1.0 / (ray.y + 0.16);
+        vec2 windOffset = vec2(time * 0.008, time * 0.0035);
+        vec3 cloudCoord = vec3(ray.xz * cloudAltitude * 0.42 + windOffset, time * 0.0018);
 
-        float density = fbmCloud(cloudUV * 2.2);
-        density = smoothstep(0.42, 0.78, density) * smoothstep(0.01, 0.25, ray.y);
+        float density = fbmCloud(cloudCoord * 2.4);
+        float coverageThreshold = 0.40;
+        density = smoothstep(coverageThreshold, 0.82, density) * smoothstep(0.01, 0.28, ray.y);
 
         if (density > 0.001) {
-            // Mie forward silver lining
-            float silverLining = pow(max(cosTheta, 0.0), 4.0) * (1.0 - density);
+            // Forward Mie Scattering Silver Lining
+            float silverLining = pow(max(cosTheta, 0.0), 3.5) * (1.0 - density);
             
-            // Soft lit cloud coloring (Hindi nagiging itim)
-            vec3 cloudAmbient = mix(vec3(0.45, 0.55, 0.70), vec3(0.85, 0.50, 0.35), sunsetFactor);
-            vec3 cloudDirect  = mix(vec3(1.0, 0.98, 0.95), vec3(1.0, 0.75, 0.45), sunsetFactor) * (1.5 + silverLining * 2.5);
-            vec3 cloudFinal = mix(cloudAmbient, cloudDirect, density);
-
-            sky = mix(sky, cloudFinal, density * 0.94);
+            vec3 cloudShadow = mix(vec3(0.25, 0.32, 0.45), vec3(0.70, 0.35, 0.25), sunsetBlend);
+            vec3 cloudLit    = mix(vec3(1.0, 0.98, 0.95), vec3(1.0, 0.72, 0.38), sunsetBlend) * (1.6 + silverLining * 2.8);
+            
+            vec3 cloudColor = mix(cloudShadow, cloudLit, density);
+            finalSky = mix(finalSky, cloudColor, density * 0.95);
         }
     }
 
-    // 3. EXPOSURE + ACES FILMIC TONEMAPPING
+    // 3. EXPOSURE & ACES TONEMAPPING
     float exposure = skyData.sunDir.w;
-    vec3 finalMapped = ACESFilm(sky * exposure);
-    outColor = vec4(pow(finalMapped, vec3(1.0 / 2.2)), 1.0);
+    vec3 mapped = ACESFilm(finalSky * exposure);
+    outColor = vec4(pow(mapped, vec3(1.0 / 2.2)), 1.0);
 }
