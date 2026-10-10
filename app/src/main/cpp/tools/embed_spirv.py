@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import pathlib, sys
 out = pathlib.Path(sys.argv[1])
-entries = [(sys.argv[2], "kMeshVert"), (sys.argv[3], "kMeshFrag"), (sys.argv[4], "kSkyVert"), (sys.argv[5], "kSkyFrag")]
+entries = [(sys.argv[2], "kMeshVert"), (sys.argv[3], "kMeshFrag"), (sys.argv[4], "kSkyVert"), (sys.argv[5], "kSkyFrag"), (sys.argv[6], "kShadowVert")]
 lines = ["#pragma once", "#include <cstddef>", "#include <cstdint>"]
 for source, name in entries:
     data = pathlib.Path(source).read_bytes()
