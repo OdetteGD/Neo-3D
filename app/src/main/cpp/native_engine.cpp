@@ -364,7 +364,7 @@ public:
         cleanup();
     }
 
-    std::string status() const {
+    std::string status() {
         std::lock_guard<std::mutex> lock(statusMutex_);
         return status_;
     }
