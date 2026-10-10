@@ -75,6 +75,10 @@ class JoystickView(context: Context, private val onMove: (Float, Float) -> Unit)
     }
 }
 
+private fun ByteArray.startsWithGlbMagic(): Boolean =
+    size >= 4 && this[0] == 0x67.toByte() && this[1] == 0x6c.toByte() &&
+        this[2] == 0x54.toByte() && this[3] == 0x46.toByte()
+
 class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private external fun nativeStart(surface: Surface)
@@ -292,8 +296,26 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != 3107 || resultCode != RESULT_OK || data?.data == null) return
-        val bytes = contentResolver.openInputStream(data.data!!)?.readBytes() ?: return
-        if (surfaceReady) status.text = nativeLoadGlb(bytes)
+        // Import in-place; never recreate the Activity or restart the renderer.
+        try {
+            status.text = "Importing GLB…"
+            val bytes = contentResolver.openInputStream(data.data!!)?.use { input ->
+                input.readBytes()
+            } ?: throw IllegalStateException("Cannot open selected file")
+            if (!bytes.startsWithGlbMagic()) {
+                throw IllegalArgumentException("Selected file is not a binary GLB (glTF)")
+            }
+            if (surfaceReady) {
+                status.text = nativeLoadGlb(bytes)
+                addDiagnostic(status.text.toString())
+            } else {
+                status.text = "Import failed: 3D surface is not ready"
+            }
+        } catch (e: Exception) {
+            val message = "GLB import failed: ${e.message ?: e.javaClass.simpleName}"
+            status.text = message
+            addDiagnostic(message)
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
