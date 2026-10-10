@@ -33,12 +33,14 @@ float smoothNoise(vec3 p) {
 }
 
 float fbmCloud(vec3 p) {
+    // Multi-octave cloud field: broad cloud masses plus fine billows.
     float v = 0.0;
     v += 0.5000 * smoothNoise(p); p = p * 2.02 + vec3(1.2, 3.4, 5.6);
     v += 0.2500 * smoothNoise(p); p = p * 2.03 + vec3(2.3, 4.5, 6.7);
     v += 0.1250 * smoothNoise(p); p = p * 2.01 + vec3(3.4, 5.6, 7.8);
-    v += 0.0625 * smoothNoise(p);
-    return v;
+    v += 0.0625 * smoothNoise(p); p = p * 2.04 + vec3(4.7, 1.9, 3.1);
+    v += 0.03125 * smoothNoise(p);
+    return v / 0.96875;
 }
 
 vec3 ACESFilm(vec3 x) {
@@ -83,15 +85,29 @@ void main() {
         vec2 wind = vec2(time * 0.008, time * 0.0035);
         vec3 uvCloud = vec3(ray.xz * dome * 0.42 + wind, time * 0.0018);
 
-        float density = fbmCloud(uvCloud * 2.4);
-        density = smoothstep(0.40, 0.82, density) * smoothstep(0.01, 0.28, ray.y);
+        // Two altitude layers approximate depth and self-shadowing without a
+        // costly 3D texture; deliberately bounded for mobile Mali GPUs.
+        float broad = fbmCloud(uvCloud * 1.65);
+        float detail = fbmCloud(uvCloud * 3.7 + vec3(8.1, 2.4, 5.7));
+        float cloudShape = broad * 0.78 + detail * 0.22;
+        float lowerLayer = smoothstep(0.47, 0.76, cloudShape);
+        float upperField = fbmCloud(uvCloud * 0.92 + vec3(4.0, 7.0, 2.0));
+        float upperLayer = smoothstep(0.58, 0.84, upperField) * 0.36;
+        float verticalFade = smoothstep(0.008, 0.20, ray.y);
+        float density = clamp(max(lowerLayer, upperLayer) * verticalFade *
+                              mix(0.75, 1.25, sky.envParams.z), 0.0, 1.0);
 
         if (density > 0.001) {
-            float silverLining = pow(max(cosTheta, 0.0), 3.5) * (1.0 - density);
-            vec3 cloudShadow = mix(vec3(0.25, 0.32, 0.45), vec3(0.70, 0.35, 0.25), sunsetBlend);
-            vec3 cloudLit    = mix(vec3(1.0, 0.98, 0.95), vec3(1.0, 0.72, 0.38), sunsetBlend) * (1.6 + silverLining * 2.8);
-            vec3 cloudColor = mix(cloudShadow, cloudLit, density);
-            finalSky = mix(finalSky, cloudColor, density * 0.95);
+            float phase = 0.35 + 0.65 * pow(max(cosTheta * 0.5 + 0.5, 0.0), 5.0);
+            float silverLining = pow(max(cosTheta, 0.0), 5.0) * (1.0 - density);
+            float powder = 1.0 - exp(-density * 2.2);
+            vec3 cloudShadow = mix(vec3(0.16, 0.20, 0.29), vec3(0.42, 0.23, 0.20), sunsetBlend);
+            vec3 cloudLit = mix(vec3(1.0, 0.985, 0.96), vec3(1.0, 0.68, 0.40), sunsetBlend);
+            cloudLit *= (0.72 + phase * 0.75 + silverLining * 2.0);
+            vec3 cloudColor = mix(cloudShadow, cloudLit, clamp(powder + phase * 0.18, 0.0, 1.0));
+            // Approximate volumetric transmittance and soft edge scattering.
+            float extinction = 1.0 - exp(-density * 2.4);
+            finalSky = mix(finalSky, cloudColor, clamp(extinction * 0.94, 0.0, 0.96));
         }
     }
 
