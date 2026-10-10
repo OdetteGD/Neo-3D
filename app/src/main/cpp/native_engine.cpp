@@ -347,7 +347,7 @@ public:
             started_ = std::chrono::steady_clock::now();
             thread_ = std::thread(&VulkanRenderer::renderLoop, this);
         } catch (const std::exception& e) {
-            status_ = std::string("Vulkan init failed: ") + e.what();
+            setStatus(std::string("Vulkan init failed: ") + e.what());
             LOGE("%s", status_.c_str());
             cleanup();
         }
@@ -364,7 +364,10 @@ public:
         cleanup();
     }
 
-    std::string status() const { return status_; }
+    std::string status() const {
+        std::lock_guard<std::mutex> lock(statusMutex_);
+        return status_;
+    }
 
     void look(float dx, float dy) {
         yaw_.store(yaw_.load() + dx * 0.0035f);
@@ -461,11 +464,11 @@ public:
             glbRanges_ = std::move(ranges);
             hasGlbModel_ = true;
 
-            status_ = "Ultra GLB Imported (" + std::to_string(vertexTotal) + " verts)";
+            setStatus("Ultra GLB Imported (" + std::to_string(vertexTotal) + " verts)");
             LOGI("%s", status_.c_str());
             return status_;
         } catch (const std::exception& e) {
-            status_ = std::string("GLB Error: ") + e.what();
+            setStatus(std::string("GLB Error: ") + e.what());
             LOGE("%s", status_.c_str());
             return status_;
         }
@@ -555,7 +558,7 @@ private:
 
     // Controls, Physics, & LifeCycle
     std::atomic<bool> running_{false}, resizeRequested_{false}, jumpRequested_{false};
-    std::mutex gpuMutex_, physicsMutex_, lifecycleMutex_;
+    std::mutex gpuMutex_, physicsMutex_, lifecycleMutex_, statusMutex_;
     CharacterController player_;
     std::vector<PhysicsObstacle> physicsObstacles_;
     std::atomic<float> yaw_{0.0f}, pitch_{-0.1f};
@@ -568,6 +571,11 @@ private:
     std::thread thread_;
     std::chrono::steady_clock::time_point started_{};
     std::string deviceName_ = "GPU", status_ = "Initializing Engine...";
+
+    void setStatus(const std::string& message) {
+        std::lock_guard<std::mutex> lock(statusMutex_);
+        status_ = message;
+    }
 
     void initialize() {
         VkApplicationInfo app{};
@@ -620,7 +628,7 @@ private:
         // 4. Detailed High-Poly Realistic Scene Geometry
         buildUltraRealisticEnvironment();
 
-        status_ = "Engine Online | " + deviceName_ + " | Forward+ PBR & CSM Shadow Active";
+        setStatus("Engine Online | " + deviceName_ + " | Forward+ PBR & CSM Shadow Active");
     }
 
     void selectDevice() {
@@ -1761,11 +1769,11 @@ private:
         }
         } catch (const std::exception& e) {
             running_.store(false);
-            status_ = std::string("Vulkan render loop stopped safely: ") + e.what();
+            setStatus(std::string("Vulkan render loop stopped safely: ") + e.what());
             LOGE("%s", status_.c_str());
         } catch (...) {
             running_.store(false);
-            status_ = "Vulkan render loop stopped safely: unknown native exception";
+            setStatus("Vulkan render loop stopped safely: unknown native exception");
             LOGE("%s", status_.c_str());
         }
     }
